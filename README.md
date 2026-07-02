@@ -1,125 +1,265 @@
-# SilkRouter v2
+# SilkRouter
 
-A lightweight linux toolkit to help routing commands via proxy. \
-It builds a local proxy cache and routes any command through a fast random proxy — plus companion DNS-blacklist and proxy-detection checkers.
+A single, dependency-free, cross-platform **Go binary** that builds a fast
+local proxy cache and routes any command through a random proxy — plus built-in
+blacklist and proxy/anonymity checkers.
 
----
+SilkRouter v3 is a full rewrite of the original bash toolkit (`px.sh`,
+`blcheck.sh`, `proxycheck.sh`) into one static binary. No `curl`, no `awk`, no
+`shuf` — nothing to install. It cross-compiles to Linux, Windows, macOS (amd64
+and arm64) with `CGO_ENABLED=0`.
 
-## Contents
-### Scripts
-- [`px.sh`](px.sh) — Proxy router & cache updater
-- [`blcheck.sh`](blcheck.sh) — IP blacklist checker
-- [`proxycheck.sh`](proxycheck.sh) — Proxy/anonymity detection checker
-### Extras
-- [`Free sources`](proxy/README.md) - Collection of free proxy sources
-- [`Big RAW list`](proxy/LIST.txt) - Consolidated RAW list of proxies. (Around 12k proxies in `protocol://ip:port` format.)
-  
----
-
-## Installation
-
-1. Move the `.sh` scripts into your `$PATH` (e.g. `/bin`) and make them executable:
-   ```sh
-   chmod +x /bin/px.sh
-   ...
-   ```
-   **or** alias them in your `.bashrc` / `.zshrc`:
-   ```sh
-   alias px='bash /path/to/px.sh'
-   ...
-   ```
-
-**Dependencies:** `bash 4+` (or any other shell), `curl`, `awk`, `xargs`, `shuf`, `sort`, `grep` (with `-P`/PCRE support, for `proxycheck.sh`)
+> The original shell scripts are preserved under [`legacy/`](legacy/).
 
 ---
 
-## `px.sh` - Proxy Router & Cache Builder
+## Highlights
 
-Build a fast local proxy cache and route any command through it.
+- **One binary, all tools.** `build`, `route`, `check`, `blcheck`,
+  `proxycheck` — the whole toolkit in a single subcommand-driven executable.
+- **All protocols, natively.** `http`, `https`, `socks4`, `socks4a` and
+  `socks5` are dialed by hand-rolled, standard-library clients — including
+  SOCKS4/4a which most Go proxy libraries don't support.
+- **Many ways to cache.** Validation is no longer hard-wired to Cloudflare.
+  Pick from nine built-in **probes** (Cloudflare, Google, gstatic, Apple,
+  Microsoft, example.com, ipify, AWS, icanhazip) or supply your own
+  `-test-url`. Adding a new probe is a one-line registry entry.
+- **Robust error handling.** Every dial, handshake, fetch and probe returns a
+  descriptive error; the caching pipeline reports precise failure reasons and
+  never overwrites a good cache with an empty result.
+- **Offline-capable.** The consolidated proxy list is embedded in the binary
+  (`-builtin`), so you can build a cache with no network source.
+- **Easy to extend.** Clean `internal/` packages: `proxy` (dialers),
+  `probe` (validation methods), `source` (candidate lists), `cache`
+  (build/merge/report), `router` (command execution), `scan` (checkers).
+
+---
+
+## Install
+
+Download a release binary, or build from source:
 
 ```sh
-px.sh [run-opts] <command...>   # route a command through a cached proxy
-px.sh -B [build-opts]           # (re)build the cache and exit
+git clone https://github.com/Szmelc-INC/SilkRouter
+cd SilkRouter
+make build            # -> ./silkrouter
+sudo make install     # -> /usr/local/bin/silkrouter
 ```
 
-### Run flags
+Requires Go 1.24+ to build. The resulting binary has **no runtime
+dependencies**.
 
-| Flag | Description | Default |
-|------|-------------|---------|
-| `-f FILE` | Proxy list file | `$PX_LIST` or `/tmp/proxy.list` |
-| `-d MAX` | Max delay (ms) | `1000` |
-| `-D MIN` | Min delay (ms) | `0` |
-| `-H` | HTTP proxies only | — |
-| `-s` | SOCKS proxies only | — |
-| `-p PROXY` | Force a specific proxy (skips list & filters) | — |
-| `-x` | Skip verification — fire through first pick | default for cache |
-| `-c` | Verify candidates until one answers | default for `-r` |
-| `-t SEC` | Verify timeout | `8` |
-| `-r` | Ignore cache, grab a fresh proxy from the source | — |
-| `-v` | Print the exit IP (one request through the chosen proxy) | — |
+Cross-compile everything into `dist/`:
 
-### Build flags (with `-B`, or on first-run prompt)
-
-| Flag | Description | Default |
-|------|-------------|---------|
-| `-u URL` | Source proxy-list URL | — |
-| `-j N` | Parallel jobs | `50` |
-| `-n N` | Samples averaged per proxy | `2` |
-| `-w SEC` | Per-ping timeout | `60` |
-| `-a` | Also log DEAD proxies | — |
-
-The cache is written as `protocol://ip:port [Nms]`, sorted fastest → slowest.
+```sh
+make release
+```
 
 ---
 
-## `blcheck.sh` - Blacklist Checker
-
-Check IP(s) against ~60 DNS blacklists via mxtoolbox's web API.
+## Quick start
 
 ```sh
-blcheck.sh [options] <ip>
-blcheck.sh [options] -f <file>
-```
+# 1. Build a tested, sorted cache (defaults to the upstream proxy list)
+silkrouter build
 
-| Flag | Description | Default |
-|------|-------------|---------|
-| `-f, --file FILE` | Check every address in `FILE` (one per line). Writes `FILE-BL` with original lines + verdict appended. | — |
-| `-t, --token TOK` | mxtoolbox tempauthorization token. Precedence: `-t` > `$MXTB_TOKEN` > auto-fetch from `/api/v1/user` | — |
-| `-d, --delay SEC` | Delay between lookups in file mode | `$DELAY` |
-| `-v, --verbose` | Single-IP mode: list every blacklist (green OK / red LISTED) | — |
-| `-n, --no-color` | Disable colored output | — |
-| `-h, --help` | Show help | — |
+# 2. Route a command through a random cached proxy
+silkrouter route -- curl -s https://ifconfig.me
+
+# 3. Inspect the cache
+silkrouter list
+```
 
 ---
 
-## `proxycheck.sh` - Proxy Detection Checker
+## Commands
 
-Route a request through a given proxy and check whether it's flagged as a known proxy/anonymizer (rDNS, WIMIA, Tor, Geo-location, and HTTP-header heuristics) via whatismyipaddress.com's proxy-check.
+```
+silkrouter <command> [options]
 
-```sh
-proxycheck.sh -i <ip|ip:port|proto://ip:port>
-proxycheck.sh -f <file> [-o <file>] [-t <sec>] [-d <sec>]
+  route      run a command through a cached/random proxy
+  build      build/append the proxy cache (test & sort proxies)
+  recache    re-test the proxies already in the cache (prune dead)
+  list       print a report of the current cache
+  check      test a single proxy or a file of proxies
+  blcheck    check IP(s) against ~60 DNS blacklists (mxtoolbox)
+  proxycheck check proxy/anonymity detection (whatismyipaddress)
+  probes     list the available caching probes
+  version    print the version
+  help       show this help
 ```
 
-| Flag | Description | Default |
-|------|-------------|---------|
-| `-i, --ip TARGET` | Single check. Accepts `ip`, `ip:port`, or `proto://ip:port` | — |
-| `-f, --file FILE` | Bulk check every proxy in `FILE` (one per line). Writes `FILE-PX` with original lines + verdict appended. | — |
-| `-o, --output FILE` | Override output path for `-f` mode | `<file>-PX` |
-| `-t, --timeout SEC` | Curl connect/max timeout | `8` |
-| `-d, --delay SEC` | Delay between requests in bulk mode | `0` |
-| `-h, --help` | Show help | — |
+Run `silkrouter <command> -h` for command-specific flags.
 
-List entries accept mixed formats — raw `ip`, `ip:port`, `proto://ip:port`, and `proto://ip:port [Nms]` (latency-annotated lines from scraped lists, e.g. `px.sh -B` cache output, are stripped automatically). A bare `ip` with no port is assumed to be `http` on port `80`.
+The cache lives at `$PX_LIST`, or a temp file
+(`<tmp>/silkrouter-proxy.list`) otherwise. Its format is identical to the old
+tool, so caches are interchangeable:
 
-Per-entry verdicts: `CLEAN` (no proxy signals), `DETECTED` (flagged as proxy — strongest signal is a `WIMIA` hit), `BLOCKED` (target served a Cloudflare challenge instead of a result), `FAIL` (proxy unreachable/timed out).
+```
+scheme://host:port [Nms]     # sorted fastest -> slowest
+```
+
+### `build` / `recache` — build the cache
+
+```sh
+silkrouter build [options]
+silkrouter recache [options]        # re-test current cache, prune dead
+```
+
+| Flag         | Description                                        | Default |
+|--------------|----------------------------------------------------|---------|
+| `-f FILE`    | Cache file                                         | `$PX_LIST` or temp |
+| `-u URL`     | Source proxy-list URL                              | upstream list |
+| `-F FILE`    | Build from a local proxy-list file                 | — |
+| `-builtin`   | Use the proxy list embedded in the binary (offline)| — |
+| `-probe NAME`| Caching probe (see `silkrouter probes`)            | `cloudflare` |
+| `-test-url U`| Custom probe URL (any 2xx = alive)                 | — |
+| `-j N`       | Parallel workers                                   | `200` |
+| `-n N`       | Samples averaged per proxy                         | `2` |
+| `-w SEC`     | Per-try timeout                                    | `15` |
+| `-a`         | Also log DEAD proxies                              | — |
+| `-O`         | Overwrite instead of append-merging                | — |
+
+`build` and `recache` **append-merge** by default (new timings win on
+duplicates) and re-sort. `recache` always overwrites (it prunes dead entries).
+
+### `route` — run a command through a proxy
+
+```sh
+silkrouter route [options] [--] <command...>
+```
+
+Exports `ALL_PROXY` / `HTTP_PROXY` / `HTTPS_PROXY` (and lowercase variants) for
+the child process, then runs it.
+
+| Flag         | Description                                          | Default |
+|--------------|------------------------------------------------------|---------|
+| `-f FILE`    | Cache file                                            | `$PX_LIST` or temp |
+| `-d MAX`     | Max delay ms                                          | `1000` |
+| `-D MIN`     | Min delay ms                                          | `0` |
+| `-H`         | HTTP/HTTPS proxies only                               | — |
+| `-s`         | SOCKS proxies only                                    | — |
+| `-p PROXY`   | Force a specific proxy (skips list & filters)         | — |
+| `-x`         | Skip verification — fire through the first pick       | default for cache |
+| `-c`         | Verify candidates until one answers                   | default for `-r` |
+| `-t SEC`     | Verify timeout                                        | `8` |
+| `-r`         | Ignore cache, grab a fresh proxy from the source      | — |
+| `-v`         | Print the exit IP before running                      | — |
+| `-probe N`   | Probe used for verification                           | `cloudflare` |
+| `-build`     | Auto-build the cache if missing (no prompt)           | — |
+
+```sh
+silkrouter route -s -d 500 -- git pull          # socks-only, <500ms
+silkrouter route -p socks5://1.2.3.4:1080 -- wget https://example.com
+silkrouter route -r -v -- curl https://ifconfig.me   # fresh proxy, show exit IP
+```
+
+### `check` — test proxies
+
+```sh
+silkrouter check [options] <proxy | file>
+```
+
+Measures liveness and latency with the selected probe. A single argument that
+is an existing file is bulk-tested; otherwise it's treated as one proxy.
+
+```sh
+silkrouter check socks5://1.2.3.4:1080
+silkrouter check -probe ipify proxies.txt      # also prints exit IPs
+```
+
+### `blcheck` — DNS blacklist check
+
+```sh
+silkrouter blcheck [options] <ip>
+silkrouter blcheck -f <file>            # writes <file>-BL
+```
+
+| Flag        | Description                                  | Default |
+|-------------|----------------------------------------------|---------|
+| `-f FILE`   | Check every address in `FILE`                | — |
+| `-token T`  | mxtoolbox temp token (`$MXTB_TOKEN` also read)| auto-fetch |
+| `-d SEC`    | Delay between lookups in file mode           | `2` |
+| `-v`        | Single-IP: verbose listing                   | — |
+
+### `proxycheck` — proxy/anonymity detection
+
+```sh
+silkrouter proxycheck [options] <ip|ip:port|proto://ip:port>
+silkrouter proxycheck -f <file> [-o out]    # writes <file>-PX
+```
+
+Routes through the given proxy and reports `CLEAN` / `DETECTED` / `BLOCKED`
+(Cloudflare challenge) / `FAIL`. Accepts the same mixed line formats as the
+cache, including latency-annotated entries.
+
+---
+
+## Caching probes
+
+The **probe** is how SilkRouter decides a proxy is alive and how it measures
+latency. List them with `silkrouter probes`:
+
+| Probe        | Endpoint                                   | Notes |
+|--------------|--------------------------------------------|-------|
+| `cloudflare` | `cp.cloudflare.com/generate_204`           | default, fast |
+| `google`     | `www.google.com/generate_204`              | |
+| `gstatic`    | `connectivitycheck.gstatic.com/generate_204` | |
+| `msft`       | `www.msftconnecttest.com/connecttest.txt`  | |
+| `apple`      | `captive.apple.com/hotspot-detect.html`    | |
+| `example`    | `example.com`                              | IANA-reserved, very stable |
+| `ipify`      | `api.ipify.org`                            | also reports exit IP |
+| `aws`        | `checkip.amazonaws.com`                     | also reports exit IP |
+| `icanhazip`  | `icanhazip.com`                            | also reports exit IP |
+
+Or bring your own: `-test-url https://my.endpoint/health` (any `2xx` counts).
+
+---
+
+## Project layout
+
+```
+main.go             CLI dispatch + embedded proxy list
+cmd_*.go            subcommand flag parsing & output
+internal/
+  proxy/            Proxy type, parsing, http/https/socks4/socks5 dialers
+  probe/            caching probes (registry — add methods here)
+  source/           candidate lists (URL / file / embedded)
+  cache/            build (worker pool), merge, load, save, report
+  router/           proxy selection + command execution
+  scan/             blcheck + proxycheck HTML scrapers
+  ui/               cross-platform colour handling
+legacy/             original bash scripts (px.sh, blcheck.sh, proxycheck.sh)
+proxy/              free proxy sources + consolidated LIST.txt (embedded)
+```
+
+**Adding a new probe:** append one `register(Probe{...})` in
+`internal/probe/probe.go`. **Adding a new protocol:** extend the switch in
+`internal/proxy/dial.go` and add its handshake.
+
+---
+
+## Development
+
+```sh
+make build        # host binary
+make run ARGS="probes"
+make test         # go test ./...
+make test-race    # race detector (needs a C toolchain)
+make check        # fmt-check + vet + test
+make release      # cross-compile all platforms -> dist/
+make update       # git pull + rebuild
+```
 
 ---
 
 ## Notes
 
-- First run (or if `/tmp/proxy.list` is missing) prompts to build a fresh proxy cache — recommended to do and redo somewhat often.
-- Delay is measured via full curl round-trips through the proxy, not just pings; proxies are sorted fastest → slowest.
-- Free proxy lists have high failure rates — a cache of 200 working proxies out of 2,000 candidates is normal.
-- Cached proxies are trusted by default to save time; if a cached proxy recently died, your command will fail. Use `-c` to have the script hunt for a live one automatically.
-- `proxycheck.sh` checks the exit node you route through, not an arbitrary target IP — it's only meaningful when pointed at something that's actually listening as a proxy (e.g. entries from `px.sh`'s cache). Datacenter-range exits are more likely to trip Cloudflare and come back `BLOCKED` rather than a real verdict.
+- Free proxy lists have high failure rates — a few hundred live proxies out of
+  thousands of candidates is normal.
+- Latency is a full round-trip through the proxy to the probe endpoint, not a
+  ping; proxies are sorted fastest → slowest.
+- Cached proxies are trusted by default to save time (`-x`); use `-c` to have
+  `route` verify candidates until one answers.
+- `proxycheck` checks the exit node you route *through*; datacenter-range exits
+  often trip Cloudflare and return `BLOCKED` rather than a real verdict.
