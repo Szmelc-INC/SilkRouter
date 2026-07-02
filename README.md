@@ -1,127 +1,93 @@
 # SilkRouter v2
-Dependency-light bash script that **builds a fast local proxy cache**
-and **routes any command through a random proxy** from it.
 
-No frameworks, no daemons — just `curl`, `awk`, `xargs`, `shuf` and `sort`.
+A lightweight linux toolkit to help routing commands via proxy. \
+It builds a local proxy cache and routes any command through a fast random proxy — plus a companion DNS-blacklist checker.
 
----
+## Contents
 
-## Install
-- Put `px.sh` into `$PATH` (for example in `/bin/px`), then `chmod +x $(whereis px)`
-- Or add `alias px='bash /path/to/px.sh'` to your runcommand (`.bashrc` / `.zshrc`)
+- [`px.sh`](px.sh) — proxy router & cache updater
+- [`blcheck.sh`](blcheck.sh) — IP blacklist checker
 
 ---
 
-## Quick start
+## Installation
+
+1. Move the `.sh` scripts into your `$PATH` (e.g. `/bin`) and make them executable:
+   ```sh
+   chmod +x /bin/px.sh /bin/blcheck.sh
+   ```
+   **or** alias them in your `.bashrc` / `.zshrc`:
+   ```sh
+   alias px='bash /path/to/px.sh'
+   alias blcheck='bash /path/to/blcheck.sh'
+   ```
+
+**Dependencies:** `bash 4+` (or any other shell), `curl`, `awk`, `xargs`, `shuf`, `sort`
+
+---
+
+## `px.sh` - Proxy Router & Cache Builder
+
+Build a fast local proxy cache and route any command through it.
 
 ```sh
-px curl https://ifconfig.me     # first run: offers to build a cache, then routes
-px curl https://ifconfig.me     # later runs: instant pick from the cache
-px -B                           # (re)build the cache whenever you want
+px.sh [run-opts] <command...>   # route a command through a cached proxy
+px.sh -B [build-opts]           # (re)build the cache and exit
 ```
 
-On the **first run** (no cache at `/tmp/proxy.list`) it asks:
+### Run flags
 
-```
-px: no cache at /tmp/proxy.list. Build a tested, sorted cache for best routes? [Y/n]
-```
+| Flag | Description | Default |
+|------|-------------|---------|
+| `-f FILE` | Proxy list file | `$PX_LIST` or `/tmp/proxy.list` |
+| `-d MAX` | Max delay (ms) | `1000` |
+| `-D MIN` | Min delay (ms) | `0` |
+| `-H` | HTTP proxies only | — |
+| `-s` | SOCKS proxies only | — |
+| `-p PROXY` | Force a specific proxy (skips list & filters) | — |
+| `-x` | Skip verification — fire through first pick | default for cache |
+| `-c` | Verify candidates until one answers | default for `-r` |
+| `-t SEC` | Verify timeout | `8` |
+| `-r` | Ignore cache, grab a fresh proxy from the source | — |
+| `-v` | Print the exit IP (one request through the chosen proxy) | — |
 
-- **Y** (default) — tests the proxy list, measures each one's average delay, and
-  writes the working ones sorted fastest → slowest. Subsequent runs are instant.
-- **n** — skips caching and grabs a fresh (untested) proxy straight from the
-  source for this run, verifying candidates until one answers.
+### Build flags (with `-B`, or on first-run prompt)
+
+| Flag | Description | Default |
+|------|-------------|---------|
+| `-u URL` | Source proxy-list URL | — |
+| `-j N` | Parallel jobs | `50` |
+| `-n N` | Samples averaged per proxy | `2` |
+| `-w SEC` | Per-ping timeout | `60` |
+| `-a` | Also log DEAD proxies | — |
+
+The cache is written as `protocol://ip:port [Nms]`, sorted fastest → slowest.
 
 ---
 
-## Usage
+## `blcheck.sh` - Blacklist Checker
 
-### Route a command
+Check IP(s) against ~60 DNS blacklists via mxtoolbox's web API.
 
 ```sh
-px curl https://example.com        # random proxy <=1000ms, fire immediately
-px -H wget https://example.com     # http proxies only
-px -s youtube-dl ...               # socks proxies only
-px -D 200 -d 500 curl ...          # only proxies in the 200-500ms window
-px -v curl ...                     # also print the exit IP
-px -c curl ...                     # verify candidates until one answers
-px -p socks5://1.2.3.4:1080 ...    # force a specific proxy
-px -r curl ...                     # ignore cache, use a fresh proxy from source
+blcheck.sh [options] <ip>
+blcheck.sh [options] -f <file>
 ```
 
-Every invocation prints the route + process to stderr (command stdout stays
-clean):
-
-```
-[px] proxy: socks5 203.25.208.163:1011  |  cmd: curl  pid: 12345
-```
-
-By default the cached pick is trusted and used as-is (`-x`). Fresh (`-r`) picks
-are untested, so those verify-until-one-answers by default; `-c`/`-x` override
-either way.
-
-### Build / refresh the cache
-
-```sh
-px -B                     # download, test, write sorted /tmp/proxy.list
-px -B -a                  # also log DEAD proxies while testing
-px -B -w 30 -j 200        # 30s per-ping timeout, 200 parallel workers
-px -B -u <URL>            # use a different proxy-list source
-```
-
-The build runs until every proxy answers or hits the per-ping timeout (`-w`,
-default 60s) — no overall deadline. Results are collected in a temp file and
-sorted into the output only at the end, so the list is always ordered by delay.
-
-Set `PX_LIST` (or `-f FILE`) to use a different cache path.
-
----
-
-## Options
-
-| Flag | Meaning | Default |
-|------|---------|---------|
-| `-f FILE` | cache file path | `$PX_LIST` or `/tmp/proxy.list` |
-| `-d MAX` / `-D MIN` | delay window (ms) | `1000` / `0` |
-| `-H` / `-s` | http-only / socks-only | any |
-| `-p PROXY` | force a specific proxy | — |
-| `-x` / `-c` | skip / force verification | cache=skip, fresh=verify |
-| `-t SEC` | verify timeout | `8` |
-| `-r` | ignore cache, fresh from source | — |
-| `-v` | print exit IP | off |
-| `-B` | build cache and exit | — |
-| `-u URL` | source URL (build) | proxyscrape free list |
-| `-j N` / `-n N` / `-w SEC` | jobs / samples / per-ping timeout (build) | `50` / `2` / `60` |
-| `-a` | log DEAD proxies (build) | off |
-
----
-
-## How delay is measured
-
-"Delay" is the round-trip of a real request *through* the proxy (`curl --proxy`,
-averaged over `-n` samples) — not ICMP, which is meaningless through a proxy. The
-default target is a tiny `generate_204` endpoint over plain HTTP, so the number
-reflects the proxy hop rather than a TLS handshake.
-
-Cache format (one proxy per line):
-
-```
-socks5://203.25.208.163:1011 [142ms]
-http://43.133.169.167:3128 [310ms]
-```
+| Flag | Description | Default |
+|------|-------------|---------|
+| `-f, --file FILE` | Check every address in `FILE` (one per line). Writes `FILE-BL` with original lines + verdict appended. | — |
+| `-t, --token TOK` | mxtoolbox tempauthorization token. Precedence: `-t` > `$MXTB_TOKEN` > auto-fetch from `/api/v1/user` | — |
+| `-d, --delay SEC` | Delay between lookups in file mode | `$DELAY` |
+| `-v, --verbose` | Single-IP mode: list every blacklist (green OK / red LISTED) | — |
+| `-n, --no-color` | Disable colored output | — |
+| `-h, --help` | Show help | — |
 
 ---
 
 ## Notes
 
-- Free proxy lists are mostly dead or slow; a cache of a few hundred working
-  entries out of a couple thousand candidates is normal.
-- Delay confirms reachability and latency, not throughput or whether the proxy
-  forwards traffic faithfully. Verify exits yourself where that matters.
-- Skipping verification (the cache default) means a proxy that died since the
-  last build will make the command fail rather than silently re-rolling; pass
-  `-c` if you'd rather it hunt for a live one.
-- Use responsibly and only against systems you're authorized to test.
-
-## Requirements
-
-`bash` 4+, `curl`, `awk`, `xargs`, `shuf`, `sort`.
+- First run (or if `/tmp/proxy.list` is missing) prompts to build a fresh proxy cache — recommended to do and redo somewhat often.
+- Delay is measured via full curl round-trips through the proxy, not just pings; proxies are sorted fastest → slowest.
+- Free proxy lists have high failure rates — a cache of 200 working proxies out of 2,000 candidates is normal.
+- Cached proxies are trusted by default to save time; if a cached proxy recently died, your command will fail. Use `-c` to have the script hunt for a live one automatically.
