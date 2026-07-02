@@ -11,8 +11,8 @@ It builds a local proxy cache and routes any command through a fast random proxy
 - [`blcheck.sh`](blcheck.sh) — IP blacklist checker
 - [`proxycheck.sh`](proxycheck.sh) — Proxy/anonymity detection checker
 ### Extras
-- [`Decent sources`](proxy/README.md) - Collection of decent free proxies
-- [`Proxy list`](proxy/LIST.txt) - RAW .txt list of proxies (`protocol://ip:port`)
+- [`Free sources`](proxy/README.md) - Collection of free proxy sources
+- [`Big RAW list`](proxy/LIST.txt) - Consolidated RAW list of proxies. (Around 12k proxies in `protocol://ip:port` format.)
   
 ---
 
