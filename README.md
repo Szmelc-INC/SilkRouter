@@ -3,12 +3,17 @@
 A lightweight linux toolkit to help routing commands via proxy. \
 It builds a local proxy cache and routes any command through a fast random proxy — plus companion DNS-blacklist and proxy-detection checkers.
 
+---
+
 ## Contents
-
-- [`px.sh`](px.sh) — proxy router & cache updater
+### Scripts
+- [`px.sh`](px.sh) — Proxy router & cache updater
 - [`blcheck.sh`](blcheck.sh) — IP blacklist checker
-- [`proxycheck.sh`](proxycheck.sh) — proxy/anonymity detection checker
-
+- [`proxycheck.sh`](proxycheck.sh) — Proxy/anonymity detection checker
+### Extras
+- [`Decent sources`](proxy/README.md) - Collection of decent free proxies
+- [`Proxy list`](proxy/LIST.txt) - RAW .txt list of proxies (`protocol://ip:port`)
+  
 ---
 
 ## Installation
