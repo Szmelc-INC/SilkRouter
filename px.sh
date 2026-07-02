@@ -3,7 +3,10 @@
 # SilkRouter (px) — build a fast local proxy cache and route commands through it.
 #
 #   px.sh <command...>     run a command through a random cached proxy
-#   px.sh -B               (re)build the cache and exit
+#   px.sh -B               build the cache from the source URL (append-merge)
+#   px.sh -R               re-test the proxies already in the cache (prune dead)
+#   px.sh -F FILE          build the cache from a local file instead of the URL
+#   px.sh -L               print a report of the current cache and exit
 #
 # On first run (no cache) it offers to build a tested, sorted cache. Decline
 # and it grabs a fresh proxy straight from the source instead.
@@ -19,8 +22,12 @@ TEST_URL='http://cp.cloudflare.com/generate_204'   # tiny 204 for delay tests
 # build params
 JOBS=2000          # parallel workers
 TRIES=2            # samples averaged per proxy
-PING_TIMEOUT=60    # per-ping timeout (connect + transfer)
+PING_TIMEOUT=30    # per-try timeout in seconds (connect + transfer)
 SHOW_ALL=0         # -a : log DEAD proxies while building
+SRC_FILE=""        # -F : build source is a local file
+RECACHE=0          # -R : re-test proxies already in the cache ($LIST)
+OVERWRITE=0        # -O : overwrite $LIST instead of append-merging unique hits
+DO_LIST=0          # -L : print a report of the cache and exit
 # run params
 LO=0               # min delay ms
 HI=1000            # max delay ms
@@ -37,29 +44,40 @@ usage() {
 SilkRouter (px) — build a proxy cache and route commands through it
 
 usage:
-  px.sh [run-opts] <command...>   route a command through a cached proxy
-  px.sh -B [build-opts]           (re)build the cache and exit
+  px.sh [run-opts] <command...>    route a command through a cached proxy
+  px.sh -B [build-opts]            build/append the cache from the source URL
+  px.sh -R [build-opts]            re-test the current cache (prunes dead)
+  px.sh -F FILE [build-opts]       build the cache from a local file
+  px.sh -L | --list                print a report of the current cache and exit
 
 run options:
-  -f FILE   proxy list file            (default $PX_LIST or /tmp/proxy.list)
-  -d MAX    max delay ms                (default 1000)
-  -D MIN    min delay ms                (default 0)
+  -f FILE   proxy list file (cache path)  (default $PX_LIST or /tmp/proxy.list)
+  -d MAX    max delay ms                   (default 1000)
+  -D MIN    min delay ms                   (default 0)
   -H        http proxies only
   -s        socks proxies only
-  -p PROXY  force a specific proxy      (skips list & filters)
+  -p PROXY  force a specific proxy         (skips list & filters)
   -x        skip verification (default for cache) — fire through first pick
   -c        verify candidates until one answers (default for -r fresh)
-  -t SEC    verify timeout              (default 8)
+  -t SEC    verify timeout                 (default 8)
   -r        ignore cache, grab a fresh proxy from the source
   -v        print the exit IP (one request through the chosen proxy)
 
-build options (with -B, or when first-run prompt is accepted):
+build options (with -B / -R / -F, or when the first-run prompt is accepted):
   -u URL    source proxy-list URL
-  -j N      parallel jobs               (default 50)
-  -n N      samples averaged per proxy  (default 2)
-  -w SEC    per-ping timeout            (default 60)
+  -F FILE   build from a local proxy-list file instead of the URL
+  -R        re-test proxies already in the cache ($PX_LIST); prunes dead ones
+  -O        overwrite the cache instead of append-merging unique entries
+  -j N      parallel jobs                  (default 2000)
+  -n N      tries averaged per proxy       (default 2)
+  -w SEC    per-try timeout in seconds     (default 30)
   -a        also log DEAD proxies
 
+Long options: --list, --recache, --file[=FILE], --url[=URL], --overwrite,
+              --build, --fresh, --help
+
+By default -B/-F APPEND unique proxies to the cache (new timings win on
+duplicates) and re-sort fastest -> slowest. -R and -O OVERWRITE instead.
 The cache is written as:  protocol://ip:port [Nms]  sorted fastest -> slowest.
 EOF
 }
@@ -86,13 +104,50 @@ test_proxy() {
   return 0
 }
 
+# ---- gather raw proxy candidates from the chosen source -------------------
+# recache -> current cache ($LIST) ; -F FILE -> local file ; else -> URL.
+gather_source() {
+  if (( RECACHE )); then
+    if [[ ! -r $LIST ]]; then
+      echo "px: no cache to re-test at $LIST" >&2; return 1
+    fi
+    awk '{print $1}' "$LIST"          # strip the [Nms] suffix
+  elif [[ -n $SRC_FILE ]]; then
+    if [[ ! -r $SRC_FILE ]]; then
+      echo "px: cannot read source file $SRC_FILE" >&2; return 1
+    fi
+    cat "$SRC_FILE"
+  else
+    curl -fsSL "$SRC_URL"
+  fi
+}
+
+# ---- merge new results into $LIST (append unique, new timings win) --------
+# arg1 = results file with lines "<ms>\t<proxy>". Existing + new are deduped
+# by proxy, new measurements override old, output re-sorted fastest->slowest.
+merge_into_list() {
+  local newres=$1 out; out=$(mktemp)
+  {
+    # existing cache lines "proxy [Nms]" -> "ms\tproxy"
+    [[ -r $LIST ]] && awk '{ p=$1; d=$2; gsub(/[^0-9]/,"",d); if(d=="")d=0; print d"\t"p }' "$LIST"
+    # fresh results are already "ms\tproxy"; appended last so they win on dupes
+    cat "$newres"
+  } | awk -F'\t' '{ d[$2]=$1 } END { for (p in d) print d[p]"\t"p }' \
+    | sort -n | awk -F'\t' '{ printf "%s [%sms]\n", $2, $1 }' > "$out"
+  mv "$out" "$LIST"
+}
+
 # ---- build the cache ------------------------------------------------------
 build_cache() {
   local tmp res; tmp=$(mktemp); res=$(mktemp)
   export RES="$res" TRIES PING_TIMEOUT TEST_URL
   export -f test_proxy
 
-  curl -fsSL "$SRC_URL" | tr -d '\r' \
+  # write policy: re-cache refreshes the same file -> prune dead (overwrite)
+  local overwrite=$OVERWRITE
+  (( RECACHE )) && overwrite=1
+
+  gather_source | tr -d '\r' \
     | grep -E '^(socks5|socks4|https?)://[0-9.]+:[0-9]+$' | sort -u > "$tmp"
   local count; count=$(wc -l < "$tmp")
   if (( count == 0 )); then
@@ -101,8 +156,15 @@ build_cache() {
 
   local G R D Z
   if [[ -t 2 ]]; then G=$'\e[32m' R=$'\e[31m' D=$'\e[2m' Z=$'\e[0m'; else G= R= D= Z=; fi
-  echo "px: testing $count proxies (jobs=$JOBS tries=$TRIES, ${PING_TIMEOUT}s/ping) ..." >&2
+  local srcdesc
+  if   (( RECACHE ));      then srcdesc="re-cache $LIST"
+  elif [[ -n $SRC_FILE ]]; then srcdesc="file $SRC_FILE"
+  else                          srcdesc="url"; fi
+  echo "px: testing $count proxies from $srcdesc (jobs=$JOBS tries=$TRIES, ${PING_TIMEOUT}s/try) ..." >&2
 
+  # The pipeline below blocks until every xargs worker has either returned or
+  # hit its ${PING_TIMEOUT}s ceiling (max TRIES*PING_TIMEOUT per proxy), so the
+  # last tests are fully collected — nothing is dropped on the final batch.
   xargs -P "$JOBS" -I{} bash -c 'test_proxy "$@"' _ {} < "$tmp" \
   | { i=0; ok=0
       while IFS='|' read -r status f2 f3; do
@@ -117,10 +179,55 @@ build_cache() {
       printf '\n' >&2
     }
 
-  sort -n "$res" | awk -F'\t' '{ printf "%s [%sms]\n", $2, $1 }' > "$LIST"
-  local working; working=$(wc -l < "$res")
-  echo "px: cached $working/$count working -> $LIST" >&2
+  local working; working=$(wc -l < "$res" 2>/dev/null || echo 0)
+  if (( working == 0 )); then
+    echo "px: 0 working proxies this run" >&2
+    (( overwrite )) && [[ -r $LIST ]] && \
+      echo "px: keeping existing cache (refusing to overwrite with an empty result)" >&2
+    rm -f "$tmp" "$res"; return 1
+  fi
+
+  if (( overwrite )); then
+    sort -n "$res" | awk -F'\t' '{ printf "%s [%sms]\n", $2, $1 }' > "$LIST"
+    echo "px: wrote $working working -> $LIST (overwrite)" >&2
+  else
+    merge_into_list "$res"
+    echo "px: merged $working new into $LIST -> $(wc -l < "$LIST") total (deduped)" >&2
+  fi
   rm -f "$tmp" "$res"
+}
+
+# ---- report on the current cache ------------------------------------------
+list_report() {
+  if [[ ! -r $LIST ]]; then echo "px: no cache at $LIST" >&2; return 1; fi
+  local when; when=$(date -r "$LIST" +%d/%m/%Y 2>/dev/null || date +%d/%m/%Y)
+  awk -v when="$when" '
+    {
+      total++
+      proto=$1; sub(/:\/\/.*/,"",proto); pc[proto]++
+      d=$2; gsub(/[^0-9]/,"",d); if(d=="")d=0; d+=0
+      if (d < 100)       b100++
+      if (d <= 1000)     s01++
+      else if (d <= 5000)  s15++
+      else if (d <= 10000) s510++
+      else                 s10++
+    }
+    END {
+      printf "# List cached at `%s`\n", when
+      print "Proxies"
+      printf "* total: [%d]\n", total
+      order="http https socks4 socks5"; n=split(order, ord, " ")
+      for (i=1;i<=n;i++){ p=ord[i]; if (p in pc){ printf "* %s: [%d]\n", p, pc[p]; seen[p]=1 } }
+      for (p in pc){ if (!(p in seen)) printf "* %s: [%d]\n", p, pc[p] }
+      print ""
+      print "Delay"
+      printf "* Below 100ms: [%d]\n", b100+0
+      printf "* 0-1s: [%d]\n",  s01+0
+      printf "* 1-5s: [%d]\n",  s15+0
+      printf "* 5-10s: [%d]\n", s510+0
+      printf "* 10s+: [%d]\n",  s10+0
+    }
+  ' "$LIST"
 }
 
 # ---- fresh proxies straight from source (untested) ------------------------
@@ -203,12 +310,35 @@ run_mode() {
 
 # ---- dispatch -------------------------------------------------------------
 main() {
+  # normalize long options -> short equivalents before getopts
+  local a; local -a norm=()
+  for a in "$@"; do
+    case "$a" in
+      --list)      norm+=(-L) ;;
+      --recache)   norm+=(-R) ;;
+      --overwrite) norm+=(-O) ;;
+      --build)     norm+=(-B) ;;
+      --fresh)     norm+=(-r) ;;
+      --help)      norm+=(-h) ;;
+      --file=*)    norm+=(-F "${a#*=}") ;;
+      --file)      norm+=(-F) ;;
+      --url=*)     norm+=(-u "${a#*=}") ;;
+      --url)       norm+=(-u) ;;
+      *)           norm+=("$a") ;;
+    esac
+  done
+  set -- "${norm[@]}"
+
   local o OPTIND OPTARG
-  while getopts "Brf:u:d:D:Hsp:cxt:j:n:w:avh" o; do
+  while getopts "BRLOrf:F:u:d:D:Hsp:cxt:j:n:w:avh" o; do
     case "$o" in
       B) DO_BUILD=1 ;;
+      R) RECACHE=1 ;;
+      L) DO_LIST=1 ;;
+      O) OVERWRITE=1 ;;
       r) FRESH=1 ;;
       f) LIST=$OPTARG ;;
+      F) SRC_FILE=$OPTARG ;;
       u) SRC_URL=$OPTARG ;;
       d) HI=$OPTARG ;;
       D) LO=$OPTARG ;;
@@ -231,7 +361,10 @@ main() {
 
   command -v curl >/dev/null || { echo 'px: need curl' >&2; return 1; }
 
-  (( DO_BUILD )) && { build_cache; return $?; }
+  (( DO_LIST )) && { list_report; return $?; }
+  if (( DO_BUILD || RECACHE )) || [[ -n $SRC_FILE ]]; then
+    build_cache; return $?
+  fi
   run_mode "$@"
 }
 
