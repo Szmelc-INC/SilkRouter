@@ -1,12 +1,13 @@
 # SilkRouter v2
 
 A lightweight linux toolkit to help routing commands via proxy. \
-It builds a local proxy cache and routes any command through a fast random proxy — plus a companion DNS-blacklist checker.
+It builds a local proxy cache and routes any command through a fast random proxy — plus companion DNS-blacklist and proxy-detection checkers.
 
 ## Contents
 
 - [`px.sh`](px.sh) — proxy router & cache updater
 - [`blcheck.sh`](blcheck.sh) — IP blacklist checker
+- [`proxycheck.sh`](proxycheck.sh) — proxy/anonymity detection checker
 
 ---
 
@@ -14,15 +15,16 @@ It builds a local proxy cache and routes any command through a fast random proxy
 
 1. Move the `.sh` scripts into your `$PATH` (e.g. `/bin`) and make them executable:
    ```sh
-   chmod +x /bin/px.sh /bin/blcheck.sh
+   chmod +x /bin/px.sh
+   ...
    ```
    **or** alias them in your `.bashrc` / `.zshrc`:
    ```sh
    alias px='bash /path/to/px.sh'
-   alias blcheck='bash /path/to/blcheck.sh'
+   ...
    ```
 
-**Dependencies:** `bash 4+` (or any other shell), `curl`, `awk`, `xargs`, `shuf`, `sort`
+**Dependencies:** `bash 4+` (or any other shell), `curl`, `awk`, `xargs`, `shuf`, `sort`, `grep` (with `-P`/PCRE support, for `proxycheck.sh`)
 
 ---
 
@@ -85,9 +87,34 @@ blcheck.sh [options] -f <file>
 
 ---
 
+## `proxycheck.sh` - Proxy Detection Checker
+
+Route a request through a given proxy and check whether it's flagged as a known proxy/anonymizer (rDNS, WIMIA, Tor, Geo-location, and HTTP-header heuristics) via whatismyipaddress.com's proxy-check.
+
+```sh
+proxycheck.sh -i <ip|ip:port|proto://ip:port>
+proxycheck.sh -f <file> [-o <file>] [-t <sec>] [-d <sec>]
+```
+
+| Flag | Description | Default |
+|------|-------------|---------|
+| `-i, --ip TARGET` | Single check. Accepts `ip`, `ip:port`, or `proto://ip:port` | — |
+| `-f, --file FILE` | Bulk check every proxy in `FILE` (one per line). Writes `FILE-PX` with original lines + verdict appended. | — |
+| `-o, --output FILE` | Override output path for `-f` mode | `<file>-PX` |
+| `-t, --timeout SEC` | Curl connect/max timeout | `8` |
+| `-d, --delay SEC` | Delay between requests in bulk mode | `0` |
+| `-h, --help` | Show help | — |
+
+List entries accept mixed formats — raw `ip`, `ip:port`, `proto://ip:port`, and `proto://ip:port [Nms]` (latency-annotated lines from scraped lists, e.g. `px.sh -B` cache output, are stripped automatically). A bare `ip` with no port is assumed to be `http` on port `80`.
+
+Per-entry verdicts: `CLEAN` (no proxy signals), `DETECTED` (flagged as proxy — strongest signal is a `WIMIA` hit), `BLOCKED` (target served a Cloudflare challenge instead of a result), `FAIL` (proxy unreachable/timed out).
+
+---
+
 ## Notes
 
 - First run (or if `/tmp/proxy.list` is missing) prompts to build a fresh proxy cache — recommended to do and redo somewhat often.
 - Delay is measured via full curl round-trips through the proxy, not just pings; proxies are sorted fastest → slowest.
 - Free proxy lists have high failure rates — a cache of 200 working proxies out of 2,000 candidates is normal.
 - Cached proxies are trusted by default to save time; if a cached proxy recently died, your command will fail. Use `-c` to have the script hunt for a live one automatically.
+- `proxycheck.sh` checks the exit node you route through, not an arbitrary target IP — it's only meaningful when pointed at something that's actually listening as a proxy (e.g. entries from `px.sh`'s cache). Datacenter-range exits are more likely to trip Cloudflare and come back `BLOCKED` rather than a real verdict.
