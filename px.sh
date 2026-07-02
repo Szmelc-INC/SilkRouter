@@ -12,7 +12,8 @@ set -uo pipefail
 export LC_ALL=C            # force '.' decimal in curl's -w, not locale ','
 
 # ---- shared defaults ------------------------------------------------------
-SRC_URL='https://api.proxyscrape.com/v4/free-proxy-list/get?request=display_proxies&proxy_format=protocolipport&format=text'
+# Proxy list (use ~12k list from proxy/LIST.txt by default)
+SRC_URL='https://raw.githubusercontent.com/Szmelc-INC/SilkRouter/refs/heads/main/proxy/LIST.txt'
 LIST=${PX_LIST:-/tmp/proxy.list}
 TEST_URL='http://cp.cloudflare.com/generate_204'   # tiny 204 for delay tests
 # build params
