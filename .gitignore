@@ -1,0 +1,13 @@
+# Build artifacts
+/silkrouter
+/silkrouter.exe
+/dist/
+
+# Local proxy caches / checker outputs
+*.list
+*-BL
+*-PX
+
+# Editor / OS cruft
+*.swp
+.DS_Store
