@@ -46,6 +46,16 @@ type Options struct {
 	Probe         probe.Probe
 	Origin        source.Origin
 	SourceTimeout time.Duration // fresh-mode download timeout (0 = 30s)
+	// Pool, when non-nil, replaces loading CachePath: the candidates were
+	// already selected (e.g. from the database); an empty non-nil Pool
+	// means nothing matches. PoolLabel names it in messages.
+	Pool      []proxy.Proxy
+	PoolLabel string
+	// OnVerify, when set, receives every verification measurement (used
+	// to record preflight facts in the database).
+	OnVerify func(p proxy.Proxy, res probe.Result)
+	// OnChosen, when set, is called with the proxy about to be used.
+	OnChosen func(p proxy.Proxy)
 }
 
 // Run picks a proxy per opts and executes args through it. It returns the
@@ -60,8 +70,12 @@ func Run(ctx context.Context, opts Options, args []string) (int, error) {
 		return 1, err
 	}
 	if len(cand) == 0 {
-		return 1, fmt.Errorf("no proxies match (cache=%s %d-%dms want=%s)",
-			opts.CachePath, opts.MinMS, opts.MaxMS, wantLabel(opts))
+		label := "cache=" + opts.CachePath
+		if opts.PoolLabel != "" {
+			label = opts.PoolLabel
+		}
+		return 1, fmt.Errorf("no proxies match (%s %d-%dms want=%s)",
+			label, opts.MinMS, opts.MaxMS, wantLabel(opts))
 	}
 
 	// Auto verify policy: fresh proxies are untested -> verify; cache -> trust.
@@ -79,6 +93,9 @@ func Run(ctx context.Context, opts Options, args []string) (int, error) {
 		return 1, err
 	}
 
+	if opts.OnChosen != nil {
+		opts.OnChosen(chosen)
+	}
 	if opts.Verbose {
 		if exitIP == "" {
 			exitIP = probeExitIP(ctx, chosen, opts.VerifyTimeout)
@@ -112,6 +129,8 @@ func selectCandidates(ctx context.Context, opts Options) ([]proxy.Proxy, error) 
 			return nil, fmt.Errorf("fetch fresh proxies: %w", err)
 		}
 		pool = ps
+	} else if opts.Pool != nil {
+		pool = append([]proxy.Proxy(nil), opts.Pool...)
 	} else {
 		ps, err := cache.Load(opts.CachePath)
 		if err != nil {
@@ -181,6 +200,9 @@ func choose(ctx context.Context, opts Options, cand []proxy.Proxy, verify int) (
 	var lastErr error
 	for _, p := range cand {
 		res := opts.Probe.Measure(ctx, p, 1, opts.VerifyTimeout)
+		if opts.OnVerify != nil && (res.OK || ctx.Err() == nil) {
+			opts.OnVerify(p, res)
+		}
 		if res.OK {
 			return p, res.ExitIP, nil
 		}

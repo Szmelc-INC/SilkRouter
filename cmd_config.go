@@ -401,6 +401,14 @@ func runConfigKeys(ctx *cli.Context, _ []string) int {
 
 func runPaths(ctx *cli.Context, args []string) int {
 	rows := paths.Layout(ctx.ConfigPath)
+	for i := range rows {
+		if rows[i].Name == "db" && ctx.Config.DBFile() != rows[i].Path {
+			rows[i].Path = ctx.Config.DBFile()
+			rows[i].Desc += " (db.path)"
+			_, err := os.Stat(rows[i].Path)
+			rows[i].Exists = err == nil
+		}
+	}
 	if len(args) > 1 {
 		return ctx.UsageError("at most one name")
 	}

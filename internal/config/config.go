@@ -55,7 +55,8 @@ type Config struct {
 
 // CacheConfig configures the legacy text cache.
 type CacheConfig struct {
-	File string `toml:"file" help:"text cache file; empty means <home>/cache.list" env:"PX_LIST"`
+	File   string `toml:"file" help:"text cache file; empty means <home>/cache.list" env:"PX_LIST"`
+	Mirror bool   `toml:"mirror" help:"also rewrite <home>/cache.list on build/recache in database mode (px.sh compatibility)"`
 }
 
 // SourceConfig configures candidate lists.
@@ -79,6 +80,7 @@ type RouteConfig struct {
 	Verify        string   `toml:"verify" help:"verify the pick first: auto = only for fresh proxies" choices:"auto|skip|always"`
 	VerifyTimeout Duration `toml:"verify_timeout" help:"timeout of one verification"`
 	AutoBuild     bool     `toml:"auto_build" help:"build the cache without asking when it is missing"`
+	Pool          string   `toml:"pool" help:"where route picks proxies: the database, or the legacy text cache" choices:"db|cache"`
 }
 
 // BuildConfig configures cache builds.
@@ -114,8 +116,18 @@ type UIConfig struct {
 	Color string `toml:"color" help:"colored output (NO_COLOR and --no-color force never)" choices:"auto|always|never"`
 }
 
-// DBConfig is reserved for the database settings.
-type DBConfig struct{}
+// DBConfig configures the SQLite database.
+type DBConfig struct {
+	Path          string   `toml:"path" help:"database file; empty means <home>/silkrouter.db"`
+	AutoImport    bool     `toml:"auto_import" help:"fill an empty database from the embedded list and cache.list"`
+	BatchSize     int      `toml:"batch_size" help:"rows per write transaction for bulk writers (build, scans)" min:"1"`
+	FlushInterval Duration `toml:"flush_interval" help:"commit pending bulk rows at least this often"`
+	BusyTimeout   Duration `toml:"busy_timeout" help:"how long to wait for a lock held by another process"`
+	Record        bool     `toml:"record" help:"also record results in the database when a legacy text cache is used, and record route verifications"`
+	Backup        bool     `toml:"backup" help:"back the database up before 'px db reset'"`
+	ListLimit     int      `toml:"list_limit" help:"default row limit of 'px proxies' (0 = all)" min:"0"`
+	ShowRecent    int      `toml:"show_recent" help:"recent measurements shown by 'px show'" min:"0"`
+}
 
 // ScanConfig is reserved for full-scan settings.
 type ScanConfig struct{}
@@ -142,12 +154,23 @@ func Default() *Config {
 			Scheme:        "any",
 			Verify:        "auto",
 			VerifyTimeout: Seconds(8),
+			Pool:          "db",
 		},
 		Build:      BuildConfig{Workers: 200, Tries: 2, Timeout: Seconds(15)},
 		Check:      CheckConfig{Workers: 100, Tries: 1, Timeout: Seconds(8)},
 		BLCheck:    BLCheckConfig{Delay: Seconds(2), Timeout: Seconds(20)},
 		ProxyCheck: ProxyCheckConfig{Timeout: Seconds(8)},
 		UI:         UIConfig{Color: "auto"},
+		DB: DBConfig{
+			AutoImport:    true,
+			BatchSize:     500,
+			FlushInterval: Seconds(1),
+			BusyTimeout:   Seconds(5),
+			Record:        true,
+			Backup:        true,
+			ListLimit:     50,
+			ShowRecent:    15,
+		},
 	}
 	c.meta.sources = map[string]string{}
 	return c
@@ -196,6 +219,15 @@ func (c *Config) CacheFile() string {
 		return paths.ExpandUser(c.Cache.File)
 	}
 	return paths.LegacyCache()
+}
+
+// DBFile resolves the database path: db.path when set, else
+// <home>/silkrouter.db.
+func (c *Config) DBFile() string {
+	if c.DB.Path != "" {
+		return paths.ExpandUser(c.DB.Path)
+	}
+	return paths.DB()
 }
 
 // Load resolves defaults < file < environment. A missing file is not an

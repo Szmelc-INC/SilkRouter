@@ -1,8 +1,9 @@
 # SilkRouter
 
 A single, cross-platform **Go binary** with no runtime dependencies that
-builds a fast local proxy cache and routes any command through a random
-proxy — plus built-in blacklist and proxy/anonymity checkers.
+keeps a SQLite database of every known proxy, measures them and routes any
+command through a random fast one — plus built-in blacklist and
+proxy/anonymity checkers.
 
 SilkRouter is a full rewrite of the original bash toolkit (`px.sh`,
 `blcheck.sh`, `proxycheck.sh`) into one static binary. No `curl`, no `awk`, no
@@ -39,14 +40,19 @@ working (`px curl ifconfig.me`, `px -d 500 -s git pull`, `px -B`).
 - **Robust error handling.** Every dial, handshake, fetch and probe returns a
   descriptive error; the caching pipeline reports precise failure reasons and
   never overwrites a good cache with an empty result.
+- **A database of every proxy.** An embedded, pure-Go SQLite database
+  (`silkrouter.db`) holds all ~12k known proxies and every measurement,
+  with summary stats (last/best/average latency, success streaks) for fast
+  filtering and sorting: `px proxies`, `px show`, `px db …`.
 - **Offline-capable.** The consolidated proxy list is embedded in the binary
-  (`-builtin`), so you can build a cache with no network source.
+  and imported into the database on first use, so you can build with no
+  network source (`-builtin`).
 
 ---
 
 ## Install
 
-Download a release binary, or build from source (Go 1.24+):
+Download a release binary, or build from source (Go 1.26+):
 
 ```sh
 git clone https://github.com/Szmelc-INC/SilkRouter
@@ -66,7 +72,8 @@ make uninstall                                 # same PREFIX/DESTDIR rules
 
 Only `make build` is needed for a local binary (`./silkrouter`); copy or
 symlink it under any of the three names. The resulting binary has **no
-runtime dependencies**. Cross-compile everything into `dist/` with
+runtime dependencies** (SQLite is compiled in through the pure-Go
+`modernc.org/sqlite`, so `CGO_ENABLED=0` builds work everywhere). Cross-compile everything into `dist/` with
 `make release`.
 
 ### Shell completion
@@ -88,15 +95,17 @@ scripts to `completions/` (generated, not committed).
 ## Quick start
 
 ```sh
-# 1. Build a tested, sorted cache (defaults to the upstream proxy list)
-px build
+# 1. Test the proxies and record the results in the database
+px build                                # upstream list (or: px build -builtin)
 
-# 2. Route a command through a random cached proxy
+# 2. Route a command through a random fast, working proxy
 px curl -s https://ifconfig.me          # px.sh style
 px route -- curl -s https://ifconfig.me # explicit
 
-# 3. Inspect the cache and the config home
-px list
+# 3. Inspect the database and the config home
+px proxies --status alive               # aligned table, fastest first
+px show 42                              # everything about one proxy
+px db info
 px paths
 ```
 
@@ -113,7 +122,10 @@ px -B | -R | -L | -F FILE                  # px.sh modes: build, recache, list, 
 Routing        route, run     run a command through a cached/random proxy
 Cache          build          build/append the proxy cache (test & sort proxies)
                recache        re-test the proxies already in the cache (prune dead)
-               list, ls       print a report of the current cache
+               list, ls       print a report of the working proxies (database or text cache)
+Database       db             manage the SQLite database of every known proxy
+               proxies        list proxies from the database (filter, sort, page)
+               show           show everything known about one proxy
 Checks         check          test a single proxy or a file of proxies
                blcheck        check IP(s) against ~60 DNS blacklists (mxtoolbox)
                proxycheck     check proxy/anonymity detection (whatismyipaddress)
@@ -135,10 +147,14 @@ it): `--config FILE`, `--home DIR`, `--no-color` (or `NO_COLOR=1`),
 `-q/--quiet`, `-v/--verbose`, `--version`, `-h/--help`. Note that `-v` means
 verbose now; print the version with `--version` or `px version`.
 
-The text cache lives at `~/.config/szmelc/proxy/cache.list` unless `$PX_LIST`,
-the `cache.file` config key or `-f FILE` says otherwise. On first run, an
-existing pre-v4 cache (`$PX_LIST` or `<tmp>/silkrouter-proxy.list`) is copied
-there. Its format is identical to the old tool, so caches are interchangeable:
+`build`, `recache`, `route` and `list` work on the **database** by default.
+The legacy **text cache** is still fully supported: `-f FILE`, `$PX_LIST` or
+the `cache.file` config key select one (and `route.pool = "cache"` makes route
+use `<home>/cache.list`). On first run, an existing pre-v4 cache (`$PX_LIST`
+or `<tmp>/silkrouter-proxy.list`) is copied to
+`~/.config/szmelc/proxy/cache.list` and imported into the database. The
+format is identical to the old tool, so caches are interchangeable, and
+`px db export` writes it:
 
 ```
 scheme://host:port [Nms]     # sorted fastest -> slowest
@@ -165,8 +181,11 @@ px recache [options]        # re-test current cache, prune dead
 | `-a, --show-dead`        | Also log DEAD proxies                               | off (`build.show_dead`) |
 | `-O, --overwrite`        | Overwrite instead of append-merging                 | — |
 
-`build` and `recache` **append-merge** by default (new timings win on
-duplicates) and re-sort. `recache` always overwrites (it prunes dead entries).
+`build` records every result (alive or dead, with latency, exit IP and an
+error class) in the database; `recache` re-tests the alive ones. With a text
+cache selected they also **append-merge** into it (new timings win on
+duplicates) and re-sort; `recache` then rewrites it, pruning dead entries.
+`cache.mirror = true` keeps `<home>/cache.list` in sync in database mode too.
 
 ### `route` — run a command through a proxy
 
@@ -175,8 +194,10 @@ px route [options] [--] <command...>
 px [options] <command...>              # same thing, px.sh style
 ```
 
-Exports `ALL_PROXY` / `HTTP_PROXY` / `HTTPS_PROXY` (and lowercase variants) for
-the child process, then runs it.
+Picks a random **alive** proxy from the database (or the text cache, see
+above) within the latency window, exports `ALL_PROXY` / `HTTP_PROXY` /
+`HTTPS_PROXY` (and lowercase variants) for the child process, then runs it.
+Verifications (`-c`) are recorded in the database as preflight measurements.
 
 | Flag                  | Description                                     | Default (config key) |
 |-----------------------|-------------------------------------------------|----------------------|
@@ -193,6 +214,7 @@ the child process, then runs it.
 | `-v, --verbose`       | Print the exit IP before running                | — |
 | `--probe NAME`        | Probe used for verification                     | `cloudflare` (`probe.name`) |
 | `--build`             | Auto-build the cache if missing (no prompt)     | off (`route.auto_build`) |
+|                       | Pick from the database or the text cache        | `db` (`route.pool`) |
 
 ```sh
 px -s -d 500 git pull                          # socks-only, <500ms
@@ -200,6 +222,58 @@ px -p socks5://1.2.3.4:1080 wget https://example.com
 px -r -v curl https://ifconfig.me              # fresh proxy, show exit IP
 px -- build.sh                                 # a program named like a subcommand
 ```
+
+### Database — `db`, `proxies`, `show`
+
+Every known proxy lives in `~/.config/szmelc/proxy/silkrouter.db` (SQLite in
+WAL mode; `db.path` moves it). Facts — measurements, reputation verdicts,
+usage of proxied commands, tags, scan runs — are the source of truth; each
+proxy row also carries summary columns (status, last/best/average latency,
+ok/fail counts and streaks, exit IP, listings) that are updated in the same
+transaction, so filtering and sorting 12k proxies takes milliseconds. An
+empty database is filled from the embedded list and `cache.list` on first use
+(`db.auto_import`).
+
+```sh
+px proxies                                   # 50 rows, fastest first, colored table
+px proxies --status alive --socks -d 300     # fast working socks proxies
+px proxies --sort ok_streak -n 20            # most reliable
+px proxies 185.199 --json                    # search host / URL / exit IP / org
+px proxies --status alive -u -a > alive.txt  # plain URLs, no limit
+px show 42                                   # or: px show socks5://1.2.3.4:1080
+
+px db info                                   # location, schema, counts, latency buckets
+px db import FILE|URL|--builtin [--source NAME] [--cache]
+px db export [--format list|urls|csv|json] [-o FILE] [filters]
+px db export --status alive > cache.list     # a legacy text cache
+px db rebuild-stats                          # recompute summaries from the facts
+px db migrate [--status]                     # schema migrations
+px db vacuum                                 # checkpoint + compact
+px db reset [--yes] [--empty]                # back up, delete, start over
+px db path
+```
+
+Filter flags (`proxies` and `db export`): `--status`, `--scheme`, `-s/--socks`,
+`-H/--http`, `-d/--max-ms`, `-D/--min-ms`, `--untimed`, `--tag TAG[:SCOPE]`,
+`--country`, `--listed-max`, `--min-streak`, `--source`, `-S/--search`,
+`--sort KEY` (`rank`, `last_ms`, `best_ms`, `avg_ms`, `speed_score`,
+`clean_score`, `ok_streak`, `success_rate`, `checked_at`, … — each in its
+natural direction, `-r` reverses, unknown values last), `-n/--limit`,
+`--offset`, `-a/--all`.
+
+| Key                 | Default | Meaning |
+|---------------------|---------|---------|
+| `db.path`           | `<home>/silkrouter.db` | database file |
+| `db.auto_import`    | `true`  | fill an empty database from the embedded list and `cache.list` |
+| `db.batch_size`     | `500`   | rows per write transaction for bulk writers |
+| `db.flush_interval` | `1s`    | commit pending bulk rows at least this often |
+| `db.busy_timeout`   | `5s`    | wait for a lock held by another process |
+| `db.record`         | `true`  | also record when a text cache is used, and record route verifications |
+| `db.backup`         | `true`  | back up before `db reset` |
+| `db.list_limit`     | `50`    | default rows of `px proxies` |
+| `db.show_recent`    | `15`    | measurements shown by `px show` |
+| `route.pool`        | `db`    | route picks from `db` or the text `cache` |
+| `cache.mirror`      | `false` | keep `cache.list` in sync on build/recache in database mode |
 
 ### `check` — test proxies
 
@@ -253,12 +327,12 @@ All state lives in one directory, the **config home**:
 | Path            | Content                                         |
 |-----------------|-------------------------------------------------|
 | `config.toml`   | user configuration                              |
-| `silkrouter.db` | proxy database (upcoming)                       |
+| `silkrouter.db` | proxy database (SQLite, WAL)                    |
 | `lists/`        | downloaded reputation / known-proxy lists       |
 | `logs/`         | plain-text logs                                 |
 | `shell/`        | generated shell init snippets                   |
 | `run/`          | runtime state                                   |
-| `cache.list`    | the text cache                                  |
+| `cache.list`    | legacy text cache (import / export format)      |
 
 Precedence: built-in defaults < `config.toml` < environment < command-line
 flags. Every key can be set from the environment as
@@ -313,6 +387,7 @@ internal/
   proxy/            Proxy type, parsing, http/https/socks4/socks5 dialers
   probe/            caching probes (registry — add methods here)
   source/           candidate lists (URL / file / embedded)
+  db/               SQLite schema, migrations, typed queries, batched writer
   cache/            build (worker pool), merge, load, save, report
   router/           proxy selection + command execution
   scan/             blcheck + proxycheck HTML scrapers
@@ -327,7 +402,9 @@ proxy/              free proxy sources + consolidated LIST.txt (embedded)
 `cmd_<name>.go` that calls `cli.Register(cli.Command{...})` from `init()`;
 help and completion pick it up automatically. **Adding a config key:** add a
 tagged field to the struct in `internal/config/config.go` and its default to
-`Default()`. See [`docs/ARCHITECTURE-v4.md`](docs/ARCHITECTURE-v4.md).
+`Default()`. **Changing the database schema:** append a migration to
+`internal/db/migrations.go` (never edit an old one). See
+[`docs/ARCHITECTURE-v4.md`](docs/ARCHITECTURE-v4.md).
 
 ---
 
@@ -355,5 +432,7 @@ make update       # git pull + rebuild
   ping; proxies are sorted fastest → slowest.
 - Cached proxies are trusted by default to save time (`-x`); use `-c` to have
   `route` verify candidates until one answers.
+- The database only grows by facts; `px db vacuum` compacts it and
+  `px db reset` starts over (a backup is kept).
 - `proxycheck` checks the exit node you route *through*; datacenter-range exits
   often trip Cloudflare and return `BLOCKED` rather than a real verdict.

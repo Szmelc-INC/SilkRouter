@@ -20,6 +20,11 @@ type BuildOptions struct {
 	Timeout  time.Duration // per-try timeout
 	ShowAll  bool          // also log DEAD proxies
 	Progress bool          // draw the live progress line on w
+	// OnResult, when set, is called from the worker goroutines with every
+	// measurement (alive or dead), e.g. to record it in the database. It
+	// must be safe for concurrent use. Failures caused by cancelling ctx
+	// are not reported (they say nothing about the proxy).
+	OnResult func(p proxy.Proxy, res probe.Result)
 }
 
 // BuildResult reports what a build produced.
@@ -67,6 +72,9 @@ func Build(ctx context.Context, candidates []proxy.Proxy, opts BuildOptions, w i
 			defer wg.Done()
 			for p := range jobs {
 				res := opts.Probe.Measure(ctx, p, opts.Tries, opts.Timeout)
+				if opts.OnResult != nil && (res.OK || ctx.Err() == nil) {
+					opts.OnResult(p, res)
+				}
 				if res.OK {
 					p.LatencyMS = res.LatencyMS
 					working <- p

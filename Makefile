@@ -1,5 +1,5 @@
 # SilkRouter - Makefile
-# Build, test and cross-compile the dependency-free Go binary.
+# Build, test and cross-compile the CGO-free Go binary.
 
 BINARY      := silkrouter
 # Other names of the same binary (installed as symlinks).

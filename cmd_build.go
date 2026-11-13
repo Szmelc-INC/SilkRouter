@@ -3,11 +3,14 @@ package main
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"time"
 
 	"github.com/szmelc-inc/silkrouter/internal/cache"
 	"github.com/szmelc-inc/silkrouter/internal/cli"
 	"github.com/szmelc-inc/silkrouter/internal/config"
+	"github.com/szmelc-inc/silkrouter/internal/db"
+	"github.com/szmelc-inc/silkrouter/internal/paths"
 	"github.com/szmelc-inc/silkrouter/internal/probe"
 	"github.com/szmelc-inc/silkrouter/internal/proxy"
 	"github.com/szmelc-inc/silkrouter/internal/source"
@@ -25,6 +28,11 @@ type buildConfig struct {
 	showAll   bool
 	overwrite bool
 	srcDesc   string
+	// writeCache writes the text cache at cachePath (legacy mode, or
+	// cache.mirror); rec records every result into the database (nil =
+	// off).
+	writeCache bool
+	rec        *dbRecorder
 }
 
 var buildOpts struct {
@@ -48,10 +56,14 @@ func init() {
 		Summary: "build/append the proxy cache (test & sort proxies)",
 		Description: `Downloads the candidate list (or reads -F FILE, or the list embedded in
 the binary with -builtin), tests every proxy with the chosen probe and
-merges the working ones into the cache, sorted fastest first. Existing
-entries are kept (new timings win); -O overwrites the cache instead.
+records every result (alive or dead) in the database, which route then
+picks from.
 
-A run that finds no working proxy never replaces an existing cache.`,
+With a legacy text cache selected (-f FILE, $PX_LIST or cache.file) the
+working proxies are also merged into that file, sorted fastest first:
+existing entries are kept (new timings win); -O overwrites it instead. A
+run that finds no working proxy never replaces an existing cache.
+cache.mirror = true keeps <home>/cache.list in sync in database mode too.`,
 		NeedsHome: true,
 		Flags:     func(fs *cli.FlagSet) { buildFlags(fs, false) },
 		Examples: []cli.Example{
@@ -66,8 +78,10 @@ A run that finds no working proxy never replaces an existing cache.`,
 		Name:    "recache",
 		Group:   cli.GroupCache,
 		Summary: "re-test the proxies already in the cache (prune dead)",
-		Description: `Re-measures every proxy in the cache and rewrites it with the ones that
-still answer, sorted fastest first.`,
+		Description: `Re-measures every alive proxy in the database and records the results
+(the ones that stopped answering become dead). With a legacy text cache
+selected (-f FILE, $PX_LIST or cache.file) it re-tests that file instead and
+rewrites it with the proxies that still answer, sorted fastest first.`,
 		NeedsHome: true,
 		Flags:     func(fs *cli.FlagSet) { buildFlags(fs, true) },
 		Examples: []cli.Example{
@@ -76,10 +90,14 @@ still answer, sorted fastest first.`,
 		Run: func(ctx *cli.Context, args []string) int { return runBuild(ctx, args, true) },
 	})
 	cli.Register(cli.Command{
-		Name:      "list",
-		Aliases:   []string{"ls"},
-		Group:     cli.GroupCache,
-		Summary:   "print a report of the current cache",
+		Name:    "list",
+		Aliases: []string{"ls"},
+		Group:   cli.GroupCache,
+		Summary: "print a report of the working proxies (database or text cache)",
+		Description: `Prints how many working proxies there are by protocol and latency
+bucket: the alive proxies of the database, or the legacy text cache when
+one is selected (-f FILE, $PX_LIST or cache.file). See 'proxies' for a
+full table and 'db info' for the whole database.`,
 		NeedsHome: true,
 		Flags: func(fs *cli.FlagSet) {
 			fs.String(&listOpts.cache, "f,cache", fs.Config.CacheFile(), "proxy cache file").
@@ -133,18 +151,28 @@ func runBuild(ctx *cli.Context, _ []string, recache bool) int {
 		return 2
 	}
 
+	textMode := textCacheMode(ctx)
 	cfg := buildConfig{
-		cachePath: o.cache,
-		probe:     pr,
-		jobs:      o.jobs,
-		tries:     o.tries,
-		timeout:   o.wait.D(),
-		showAll:   o.showAll,
-		overwrite: o.overwrite || recache, // recache always prunes -> overwrite
+		cachePath:  o.cache,
+		probe:      pr,
+		jobs:       o.jobs,
+		tries:      o.tries,
+		timeout:    o.wait.D(),
+		showAll:    o.showAll,
+		overwrite:  o.overwrite || recache, // recache always prunes -> overwrite
+		writeCache: textMode || ctx.Config.Cache.Mirror,
+	}
+	if !textMode || ctx.Config.DB.Record {
+		cfg.rec = newRecorder(ctx)
+		defer cfg.rec.close()
+	}
+	if cfg.rec == nil && !textMode {
+		cfg.writeCache = true // database unavailable: keep the text cache going
 	}
 
 	var candidates []proxy.Proxy
-	if recache {
+	switch {
+	case recache && textMode:
 		existing, err := cache.Load(o.cache)
 		if err != nil {
 			ctx.Errorf("no cache to re-test at %s: %v", o.cache, err)
@@ -155,7 +183,27 @@ func runBuild(ctx *cli.Context, _ []string, recache bool) int {
 		}
 		candidates = existing
 		cfg.srcDesc = "re-cache " + o.cache
-	} else {
+	case recache:
+		if cfg.rec == nil {
+			ctx.Errorf("no cache to re-test: the database is not available")
+			return 1
+		}
+		alive, err := cfg.rec.d.ListProxies(ctx, db.Filter{Status: []string{db.StatusAlive}, Sort: "last_ms"})
+		if err != nil {
+			ctx.Errorf("%v", err)
+			return 1
+		}
+		if len(alive) == 0 {
+			ctx.Errorf("no cache to re-test: %v", errNoAlive)
+			return 1
+		}
+		for _, p := range alive {
+			pp := p.ToProxy()
+			pp.LatencyMS = 0
+			candidates = append(candidates, pp)
+		}
+		cfg.srcDesc = "re-cache of the database"
+	default:
 		origin := source.Origin{URL: o.srcURL, File: o.srcFile, UseBuiltin: o.builtin}
 		cfg.srcDesc = origin.Describe()
 		ps, err := origin.Candidates(ctx, ctx.Config.Source.Timeout.D())
@@ -164,6 +212,11 @@ func runBuild(ctx *cli.Context, _ []string, recache bool) int {
 			return 1
 		}
 		candidates = ps
+		if cfg.rec != nil {
+			if _, err := cfg.rec.d.ImportProxies(ctx, ps, db.ImportOptions{Source: originLabel(origin)}); err != nil {
+				ctx.Errorf("warning: database: %v", err)
+			}
+		}
 	}
 
 	code, err := doBuild(ctx, candidates, cfg)
@@ -171,6 +224,20 @@ func runBuild(ctx *cli.Context, _ []string, recache bool) int {
 		ctx.Errorf("%v", err)
 	}
 	return code
+}
+
+// originLabel is the database source label of a candidate origin.
+func originLabel(o source.Origin) string {
+	switch {
+	case o.UseBuiltin:
+		return db.SourceBuiltin
+	case o.File != "":
+		return "file:" + filepath.Base(o.File)
+	case o.URL != "":
+		return "url:" + urlHost(o.URL)
+	default:
+		return "url:" + urlHost(source.DefaultURL)
+	}
 }
 
 // doBuild tests candidates and writes them into the cache (merge or overwrite).
@@ -181,22 +248,45 @@ func doBuild(ctx *cli.Context, candidates []proxy.Proxy, cfg buildConfig) (int, 
 	ctx.Infof("testing %d proxies from %s (probe=%s jobs=%d tries=%d, %s/try) ...",
 		len(candidates), cfg.srcDesc, cfg.probe.Name, cfg.jobs, cfg.tries, cfg.timeout)
 
-	res := cache.Build(ctx, candidates, cache.BuildOptions{
+	bo := cache.BuildOptions{
 		Probe:    cfg.probe,
 		Jobs:     cfg.jobs,
 		Tries:    cfg.tries,
 		Timeout:  cfg.timeout,
 		ShowAll:  cfg.showAll,
 		Progress: !ctx.Quiet,
-	}, os.Stderr)
+	}
+	if cfg.rec != nil {
+		w, probeName := cfg.rec.w, cfg.probe.Name
+		bo.OnResult = func(p proxy.Proxy, r probe.Result) {
+			_ = w.Measure(db.Measurement{
+				Addr: db.AddrOf(p), Kind: db.KindProbe, Probe: probeName, OK: r.OK,
+				MS: r.LatencyMS, ErrClass: probe.ClassifyErr(r.Err), ExitIP: r.ExitIP,
+			})
+		}
+	}
+	res := cache.Build(ctx, candidates, bo, os.Stderr)
+
+	c := ui.Colors()
+	if cfg.rec != nil {
+		if err := cfg.rec.w.Flush(); err != nil {
+			ctx.Errorf("warning: database: %v", err)
+		}
+		st := cfg.rec.w.Stats()
+		ctx.Infof("recorded %d results (%s%d working%s) into %s", st.Measurements,
+			c.Green, len(res.Working), c.Reset, paths.Pretty(cfg.rec.d.Path()))
+	}
 
 	if len(res.Working) == 0 {
-		if cfg.overwrite {
+		if cfg.overwrite && cfg.writeCache {
 			if _, err := os.Stat(cfg.cachePath); err == nil {
 				ctx.Errorf("keeping existing cache (refusing to overwrite with 0 results)")
 			}
 		}
 		return 1, fmt.Errorf("0 working proxies this run")
+	}
+	if !cfg.writeCache {
+		return 0, nil
 	}
 
 	final := res.Working
@@ -208,7 +298,6 @@ func doBuild(ctx *cli.Context, candidates []proxy.Proxy, cfg buildConfig) (int, 
 		return 1, err
 	}
 
-	c := ui.Colors()
 	if cfg.overwrite {
 		ctx.Infof("wrote %s%d working%s -> %s (overwrite)",
 			c.Green, len(res.Working), c.Reset, cfg.cachePath)
@@ -232,19 +321,40 @@ type listEntry struct {
 	LatencyMS int    `json:"latency_ms"`
 }
 
-// runList prints a report of the current cache.
+// runList prints a report of the working proxies: the database's alive
+// proxies, or the legacy text cache when one is selected.
 func runList(ctx *cli.Context, _ []string) int {
-	ps, err := cache.Load(listOpts.cache)
-	if err != nil {
-		ctx.Errorf("no cache at %s", listOpts.cache)
-		return 1
+	var ps []proxy.Proxy
+	label := listOpts.cache
+	if textCacheMode(ctx) {
+		var err error
+		if ps, err = cache.Load(listOpts.cache); err != nil {
+			ctx.Errorf("no cache at %s", listOpts.cache)
+			return 1
+		}
+	} else {
+		code := withDB(ctx, func(d *db.DB) int {
+			alive, err := d.ListProxies(ctx, db.Filter{Status: []string{db.StatusAlive}, Sort: "last_ms"})
+			if err != nil {
+				ctx.Errorf("%v", err)
+				return 1
+			}
+			for _, p := range alive {
+				ps = append(ps, p.ToProxy())
+			}
+			label = "database " + d.Path()
+			return 0
+		})
+		if code != 0 {
+			return code
+		}
 	}
 	if listOpts.json {
 		out := struct {
 			Cache   string      `json:"cache"`
 			Count   int         `json:"count"`
 			Proxies []listEntry `json:"proxies"`
-		}{Cache: listOpts.cache, Count: len(ps), Proxies: []listEntry{}}
+		}{Cache: label, Count: len(ps), Proxies: []listEntry{}}
 		for _, p := range ps {
 			out.Proxies = append(out.Proxies, listEntry{
 				URL: p.URL(), Scheme: string(p.Scheme), Host: p.Host, Port: p.Port, LatencyMS: p.LatencyMS,
@@ -252,7 +362,7 @@ func runList(ctx *cli.Context, _ []string) int {
 		}
 		return ctx.JSON(out)
 	}
-	cache.Report(ctx.Stdout, listOpts.cache, ps)
+	cache.Report(ctx.Stdout, label, ps)
 	return 0
 }
 

@@ -11,6 +11,9 @@ import (
 
 	"github.com/szmelc-inc/silkrouter/internal/cli"
 	"github.com/szmelc-inc/silkrouter/internal/config"
+	"github.com/szmelc-inc/silkrouter/internal/db"
+	"github.com/szmelc-inc/silkrouter/internal/probe"
+	"github.com/szmelc-inc/silkrouter/internal/proxy"
 	"github.com/szmelc-inc/silkrouter/internal/router"
 	"github.com/szmelc-inc/silkrouter/internal/source"
 )
@@ -40,15 +43,18 @@ func init() {
 		Group:   cli.GroupRoute,
 		Summary: "run a command through a cached/random proxy",
 		Description: `Runs <command> with ALL_PROXY, HTTP_PROXY and HTTPS_PROXY (upper and
-lower case) set to a proxy picked at random from the cache, filtered by
-latency and protocol.
+lower case) set to a proxy picked at random from the alive proxies of the
+database, filtered by latency and protocol. With -f FILE, $PX_LIST,
+cache.file or route.pool = cache it picks from that legacy text cache
+instead. Verifications (-c) are recorded in the database as preflight
+measurements.
 
 This is also what happens when the first argument is not a known command:
 "px curl ifconfig.me" is "px route curl ifconfig.me", and px.sh-style
 options work in front of it ("px -d 500 -s curl ..."). Use "px -- <command>"
 to route a program whose name matches a subcommand.
 
-When the cache is missing, route offers to build one; decline and it grabs
+When there is nothing tested to pick from, route offers to build; decline and it grabs
 an untested proxy straight from the source (verified first).`,
 		Usage:       "[options] [--] <command> [args...]",
 		Args:        cli.ArgsCommand,
@@ -148,11 +154,40 @@ func runRoute(ctx *cli.Context, args []string) int {
 	origin := source.Origin{URL: o.srcURL, UseBuiltin: cfg.Source.Builtin}
 	fresh := o.fresh
 
-	// First-run handling: if the cache is missing (and we're not forcing a
-	// proxy or already in fresh mode), offer to build one.
+	// Pool: the database by default; the legacy text cache with -f,
+	// $PX_LIST, cache.file or route.pool = cache. -p and -r need neither.
+	var d *db.DB
+	if o.force == "" && !fresh && !textCacheMode(ctx) && cfg.Route.Pool != "cache" {
+		var err error
+		if d, err = openDB(ctx); err != nil {
+			ctx.Errorf("warning: database unavailable (%v); using the text cache %s", err, o.cache)
+			d = nil
+		} else {
+			defer d.Close()
+		}
+	}
+	filter := db.Filter{
+		Status: []string{db.StatusAlive}, MinMS: o.minMS, MaxMS: o.maxMS, IncludeUntimed: true,
+	}
+	switch {
+	case httpOnly:
+		filter.Schemes = db.ExpandSchemes([]string{"http"}, true)
+	case socksOnly:
+		filter.Schemes = db.ExpandSchemes([]string{"socks"}, false)
+	}
+
+	// First-run handling: if there is nothing tested to pick from (and
+	// we're not forcing a proxy or already in fresh mode), offer to build.
 	if o.force == "" && !fresh {
-		if _, statErr := os.Stat(o.cache); errors.Is(statErr, os.ErrNotExist) {
-			prompt := fmt.Sprintf("%s: no cache at %s. Build a tested, sorted cache?", ctx.Prog, o.cache)
+		missing, what := false, "no cache at "+o.cache
+		if d != nil {
+			n, err := d.CountProxies(ctx, db.Filter{Status: []string{db.StatusAlive}})
+			missing, what = err == nil && n == 0, "no tested proxies in the database"
+		} else if _, statErr := os.Stat(o.cache); errors.Is(statErr, os.ErrNotExist) {
+			missing = true
+		}
+		if missing {
+			prompt := fmt.Sprintf("%s: %s. Build a tested, sorted cache?", ctx.Prog, what)
 			if o.autoBuild || askYesNo(ctx.Stdin, ctx.Stderr, prompt) {
 				ps, err := origin.Candidates(ctx, cfg.Source.Timeout.D())
 				if err != nil {
@@ -162,8 +197,24 @@ func runRoute(ctx *cli.Context, args []string) int {
 				bc := buildConfig{
 					cachePath: o.cache, probe: pr, jobs: cfg.Build.Workers, tries: cfg.Build.Tries,
 					timeout: cfg.Build.Timeout.D(), srcDesc: origin.Describe(),
+					writeCache: d == nil || cfg.Cache.Mirror,
 				}
-				if code, err := doBuild(ctx, ps, bc); err != nil || code != 0 {
+				if d != nil {
+					if _, err := d.ImportProxies(ctx, ps, db.ImportOptions{Source: originLabel(origin)}); err != nil {
+						ctx.Errorf("warning: database: %v", err)
+					}
+					bc.rec = &dbRecorder{d: d, w: d.NewWriter(ctx, db.WriterOptions{
+						BatchSize: cfg.DB.BatchSize, FlushInterval: cfg.DB.FlushInterval.D(),
+						OnError: func(err error, n int) {
+							ctx.Errorf("warning: database: %d rows not recorded: %v", n, err)
+						},
+					})}
+				}
+				code, err := doBuild(ctx, ps, bc)
+				if bc.rec != nil {
+					bc.rec.w.Close() // the database itself stays open
+				}
+				if err != nil || code != 0 {
 					ctx.Errorf("build failed, falling back to fresh proxies")
 					fresh = true
 				}
@@ -189,11 +240,37 @@ func runRoute(ctx *cli.Context, args []string) int {
 		Origin:        origin,
 		SourceTimeout: cfg.Source.Timeout.D(),
 	}
+	if d != nil && !fresh {
+		rows, err := d.ListProxies(ctx, filter)
+		if err != nil {
+			ctx.Errorf("%v", err)
+			return 1
+		}
+		opts.Pool = make([]proxy.Proxy, 0, len(rows))
+		for _, p := range rows {
+			opts.Pool = append(opts.Pool, p.ToProxy())
+		}
+		opts.PoolLabel = "database"
+	}
+	if d != nil && cfg.DB.Record {
+		opts.OnVerify = func(p proxy.Proxy, r probe.Result) {
+			if _, err := d.RecordMeasurement(ctx, db.Measurement{
+				Addr: db.AddrOf(p), Kind: db.KindPreflight, Probe: pr.Name, OK: r.OK,
+				MS: r.LatencyMS, ErrClass: probe.ClassifyErr(r.Err), ExitIP: r.ExitIP,
+			}); err != nil {
+				ctx.Debugf("database: %v", err)
+			}
+		}
+	}
 
 	code, err := router.Run(ctx, opts, args)
 	if err != nil {
 		if errors.Is(err, router.ErrNoCache) {
-			ctx.Errorf("no cache at %s (build one, or use -r for fresh)", o.cache)
+			if d != nil {
+				ctx.Errorf("no tested proxies in the database (run build, or use -r for fresh)")
+			} else {
+				ctx.Errorf("no cache at %s (build one, or use -r for fresh)", o.cache)
+			}
 			return 1
 		}
 		ctx.Errorf("%v", err)
