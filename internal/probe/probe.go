@@ -152,7 +152,8 @@ func (pr Probe) Measure(ctx context.Context, p proxy.Proxy, tries int, timeout t
 			lastErr = err
 			continue
 		}
-		totalMS += int(time.Since(start).Milliseconds())
+		// Round sub-millisecond answers up: LatencyMS 0 means "unknown".
+		totalMS += max(1, int(time.Since(start).Milliseconds()))
 		ok++
 		if ip != "" {
 			exitIP = ip

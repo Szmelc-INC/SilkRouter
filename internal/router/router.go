@@ -42,8 +42,10 @@ type Options struct {
 	VerifyTimeout time.Duration
 	Fresh         bool
 	Verbose       bool
+	Quiet         bool // suppress the "[silkrouter] proxy: ..." banner
 	Probe         probe.Probe
 	Origin        source.Origin
+	SourceTimeout time.Duration // fresh-mode download timeout (0 = 30s)
 }
 
 // Run picks a proxy per opts and executes args through it. It returns the
@@ -86,7 +88,7 @@ func Run(ctx context.Context, opts Options, args []string) (int, error) {
 		}
 	}
 
-	return runCommand(ctx, chosen, args)
+	return runCommand(ctx, chosen, args, opts.Quiet)
 }
 
 // selectCandidates gathers the pool of proxies to consider, before filtering.
@@ -101,7 +103,11 @@ func selectCandidates(ctx context.Context, opts Options) ([]proxy.Proxy, error) 
 
 	var pool []proxy.Proxy
 	if opts.Fresh {
-		ps, err := opts.Origin.Candidates(ctx, 30*time.Second)
+		timeout := opts.SourceTimeout
+		if timeout <= 0 {
+			timeout = 30 * time.Second
+		}
+		ps, err := opts.Origin.Candidates(ctx, timeout)
 		if err != nil {
 			return nil, fmt.Errorf("fetch fresh proxies: %w", err)
 		}
@@ -194,7 +200,7 @@ func probeExitIP(ctx context.Context, p proxy.Proxy, timeout time.Duration) stri
 
 // runCommand runs args with proxy env vars set, forwarding std streams, and
 // returns the child's exit code.
-func runCommand(ctx context.Context, p proxy.Proxy, args []string) (int, error) {
+func runCommand(ctx context.Context, p proxy.Proxy, args []string, quiet bool) (int, error) {
 	cmd := exec.CommandContext(ctx, args[0], args[1:]...)
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
@@ -205,7 +211,9 @@ func runCommand(ctx context.Context, p proxy.Proxy, args []string) (int, error) 
 	if i := strings.LastIndexAny(short, `/\`); i >= 0 {
 		short = short[i+1:]
 	}
-	ui.Errf("[silkrouter] proxy: %s %s  |  cmd: %s\n", p.Scheme, p.Addr(), short)
+	if !quiet {
+		ui.Errf("[silkrouter] proxy: %s %s  |  cmd: %s\n", p.Scheme, p.Addr(), short)
+	}
 
 	if err := cmd.Run(); err != nil {
 		var ee *exec.ExitError

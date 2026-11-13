@@ -2,13 +2,26 @@
 # Build, test and cross-compile the dependency-free Go binary.
 
 BINARY      := silkrouter
+# Other names of the same binary (installed as symlinks).
+ALIASES     := px s-proxy
 PKG         := .
 DIST        := dist
-PREFIX      ?= /usr/local
-INSTALL_DIR := $(PREFIX)/bin
+
+# Install locations. The default needs no root: $(HOME)/.local/bin is on
+# most PATHs. Packagers use PREFIX=/usr plus DESTDIR=<staging dir>.
+PREFIX       ?= $(HOME)/.local
+DESTDIR      ?=
+BINDIR       ?= $(PREFIX)/bin
+DATADIR      ?= $(PREFIX)/share
+ZSH_COMPDIR  ?= $(DATADIR)/zsh/site-functions
+BASH_COMPDIR ?= $(DATADIR)/bash-completion/completions
+FISH_COMPDIR ?= $(DATADIR)/fish/vendor_completions.d
+
+# Generated shell completions (gitignored; `make completions` rebuilds them).
+COMPDIR     := completions
 
 # Version is derived from git when available, else a sane default.
-VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo 2.0.0)
+VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo 4.0.0-dev)
 LDFLAGS := -s -w -X main.version=$(VERSION)
 
 # CGO off => fully static, portable binaries.
@@ -39,17 +52,34 @@ build:
 run:
 	go run $(PKG) $(ARGS)
 
-## install: install the binary into $(INSTALL_DIR)
-.PHONY: install
-install: build
-	install -d $(INSTALL_DIR)
-	install -m 0755 $(BINARY) $(INSTALL_DIR)/$(BINARY)
-	@echo "installed $(INSTALL_DIR)/$(BINARY)"
+## completions: generate zsh/bash/fish completion scripts into completions/
+.PHONY: completions
+completions: build
+	@mkdir -p $(COMPDIR)
+	./$(BINARY) completion zsh  > $(COMPDIR)/_$(BINARY)
+	./$(BINARY) completion bash > $(COMPDIR)/$(BINARY).bash
+	./$(BINARY) completion fish > $(COMPDIR)/$(BINARY).fish
 
-## uninstall: remove the installed binary
+## install: install silkrouter, px/s-proxy symlinks and completions under $(PREFIX) (no root needed)
+.PHONY: install
+install: build completions
+	install -d $(DESTDIR)$(BINDIR) $(DESTDIR)$(ZSH_COMPDIR) $(DESTDIR)$(BASH_COMPDIR) $(DESTDIR)$(FISH_COMPDIR)
+	install -m 0755 $(BINARY) $(DESTDIR)$(BINDIR)/$(BINARY)
+	for a in $(ALIASES); do ln -sf $(BINARY) $(DESTDIR)$(BINDIR)/$$a; done
+	install -m 0644 $(COMPDIR)/_$(BINARY) $(DESTDIR)$(ZSH_COMPDIR)/_$(BINARY)
+	install -m 0644 $(COMPDIR)/$(BINARY).bash $(DESTDIR)$(BASH_COMPDIR)/$(BINARY)
+	for a in $(ALIASES); do ln -sf $(BINARY) $(DESTDIR)$(BASH_COMPDIR)/$$a; done
+	install -m 0644 $(COMPDIR)/$(BINARY).fish $(DESTDIR)$(FISH_COMPDIR)/$(BINARY).fish
+	for a in $(ALIASES); do ln -sf $(BINARY).fish $(DESTDIR)$(FISH_COMPDIR)/$$a.fish; done
+	@echo "installed $(BINARY), $(ALIASES) into $(DESTDIR)$(BINDIR) and completions under $(DESTDIR)$(DATADIR)"
+	@case ":$$PATH:" in *":$(BINDIR):"*) ;; *) echo "note: $(BINDIR) is not on your PATH";; esac
+
+## uninstall: remove everything install put under $(PREFIX)
 .PHONY: uninstall
 uninstall:
-	rm -f $(INSTALL_DIR)/$(BINARY)
+	rm -f $(DESTDIR)$(BINDIR)/$(BINARY) $(DESTDIR)$(ZSH_COMPDIR)/_$(BINARY)
+	rm -f $(DESTDIR)$(BASH_COMPDIR)/$(BINARY) $(DESTDIR)$(FISH_COMPDIR)/$(BINARY).fish
+	for a in $(ALIASES); do rm -f $(DESTDIR)$(BINDIR)/$$a $(DESTDIR)$(BASH_COMPDIR)/$$a $(DESTDIR)$(FISH_COMPDIR)/$$a.fish; done
 
 ## test: run the test suite
 .PHONY: test
@@ -108,6 +138,7 @@ update:
 .PHONY: clean
 clean: clean-dist
 	rm -f $(BINARY)
+	rm -rf $(COMPDIR)
 
 .PHONY: clean-dist
 clean-dist:

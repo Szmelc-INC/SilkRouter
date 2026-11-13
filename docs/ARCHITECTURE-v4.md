@@ -37,18 +37,48 @@ Layout inside Home:
 | `run/`            | runtime state (session files, relay sockets, pids)   |
 | `cache.list`      | legacy text cache export (`scheme://host:port [Nms]`)|
 
-`$PX_LIST` / `-f FILE` keep working as a legacy text-cache override. On first
-run, an existing legacy cache (`$PX_LIST` or `<tmp>/silkrouter-proxy.list`) is
-imported into the DB.
+`$PX_LIST` / `-f FILE` keep working as a legacy text-cache override (so does
+the `cache.file` config key); otherwise route/build/list use `cache.list`.
+On first run, an existing legacy cache (`$PX_LIST` or
+`<tmp>/silkrouter-proxy.list`, whichever first holds a valid proxy) is copied
+to `cache.list` if that file does not exist yet (`cache.ImportLegacy`, run by
+the first-run hook in `main.go`), and the db layer imports `cache.list` into
+the DB. px.sh's generic `<tmp>/proxy.list` is not auto-imported; point
+`$PX_LIST` at it.
+
+`paths.Ensure()` creates Home and its sub-directories (mode 0700). It runs only
+for commands registered with `NeedsHome: true`; read-only commands (help,
+completion, `paths`, `config get/show`, ...) never create anything.
 
 ## Configuration (`internal/config`)
 
 - Format: **TOML** (`github.com/BurntSushi/toml`), file `config.toml`.
 - Precedence: built-in defaults < `config.toml` < environment
   (`SILKROUTER_*`, legacy `PX_*`) < command-line flags.
-- `px config {path,show,get,set,edit,init,reset}`; `edit` uses `$EDITOR`.
+- `px config {path,show,get,set,edit,init,reset,keys}`; `edit` uses
+  `$VISUAL`/`$EDITOR`. `set`/`reset`/`init` rewrite the file in canonical,
+  commented form (keys equal to their default are commented out) and keep
+  `config.toml.bak`. `show --sources` / `Config.Origin(key)` report where a
+  value came from (`default`, `file`, `env NAME`).
 - Every tunable introduced by any task (timeouts, worker counts, tag
   thresholds, prompt icon, …) gets a config key with a documented default.
+- Adding a key = one field in the section struct in `config.go` plus its
+  default in `Default()`. Struct tags: `toml:"name"` (key), `help:"…"`
+  (required, shown in the file and `config keys`), optional `choices:"a|b"`,
+  `min:"N"`, `env:"LEGACY_NAME"`. Get/set, env (`SILKROUTER_<TABLE>_<KEY>`),
+  validation, the commented file, `config keys` and completion all derive
+  from that. Supported types: string, bool, ints, floats, `[]string`
+  (comma-separated on the command line) and `config.Duration` (seconds or a
+  Go duration; use it for every time value). Nested structs are tables.
+- Sections declared for later tasks (empty today): `[db]`, `[scan]`,
+  `[tags]`, `[history]`, `[shell]`, `[tui]`. Existing: `[cache]`, `[source]`,
+  `[probe]`, `[route]`, `[build]`, `[check]`, `[blcheck]`, `[proxycheck]`,
+  `[ui]`.
+- `config.Load(path, os.LookupEnv)` = defaults < file < env (what commands
+  get in `ctx.Config`); `config.LoadFile(path)` skips the env layer and is what
+  anything that writes the file must use. A missing file is not an error;
+  unknown keys and invalid values become warnings (invalid values fall back
+  to the default).
 
 ## CLI (`internal/cli`)
 
@@ -60,17 +90,62 @@ imported into the DB.
   registry — tasks must not need to edit a central switch.
 - A `Command` has: name, aliases, group, one-line summary, long description,
   usage line, flag set, examples, and a `Run(ctx, args) int`. Help and shell
-  completion are generated from this metadata.
+  completion are generated from this metadata. Concretely:
+
+  ```go
+  cli.Register(cli.Command{
+      Name: "list", Aliases: []string{"ls"}, Group: cli.GroupCache,
+      Summary: "print a report of the current cache",
+      Description: "…", Usage: "[options] <arg>",
+      Flags: func(fs *cli.FlagSet) {       // declare only; runs for help too
+          fs.String(&opts.cache, "f,cache", fs.Config.CacheFile(), "proxy cache file").
+              Placeholder("FILE").Files().ConfigKey("cache.file")
+          fs.Bool(&opts.json, "json", false, "print JSON")
+      },
+      Args:      cli.ArgsFiles,             // positional completion
+      Examples:  []cli.Example{{Cmd: "list --json", Desc: "…"}},
+      NeedsHome: true,                      // Ensure() + first-run hook first
+      Run: func(ctx *cli.Context, args []string) int { … },
+  })
+  ```
+
+  `*cli.Context` embeds the signal-cancelled `context.Context` and carries
+  `Config`, `ConfigPath`, `Flags` (`Changed(name)`), `Stdout/Stderr/Stdin`,
+  `Quiet`, `Verbose`, `Prog`, `Legacy`, plus `Errorf/Infof/Debugf`,
+  `UsageError` (exit 2), `JSON(v)`, `Colors()`. Flag names are
+  comma-separated (`"j,workers,jobs"`); `fs.Duration` takes
+  `config.Duration`. Other fields: `Subcommands []cli.Command` (nested
+  groups, e.g. `config set`), `PassThrough` (stop parsing at the first
+  positional — route; other commands accept flags after positionals),
+  `Hidden`. Groups: `cli.GroupRoute`, `GroupCache`, `GroupDB`, `GroupScan`,
+  `GroupCheck`, `GroupHistory`, `GroupShell`, `GroupTUI`, `GroupConfig`,
+  `GroupMeta` (help lists them in that order).
+- Dynamic completion values come from `cli.RegisterCompleter(topic, fn)`
+  and are served by the hidden `px __complete <topic>` (topics today:
+  `commands`, `probes`, `config-keys`); use them with `Flag.Dynamic(topic)`
+  or `cli.ArgsDynamic(topic)`.
+- Global flags (before the command): `--config FILE`, `--home DIR`,
+  `--no-color`, `-q/--quiet`, `-v/--verbose`, `--version`, `-h/--help`;
+  `--no-color`, `-q`, `-v` also work after the command unless it defines the
+  same name (route's `-v` prints the exit IP, as in px.sh). Usage errors exit
+  2.
 - Help output is colored and aligned (groups, flags table, examples);
   `--no-color` and `NO_COLOR` disable color. Data commands offer `--json`.
 - `px completion {zsh,bash,fish}` prints a completion script generated from the
-  registry.
+  registry. `make completions` writes them to `completions/` (generated,
+  gitignored); `make install` installs them for all three names under
+  `$(PREFIX)/share/{zsh/site-functions,bash-completion/completions,fish/vendor_completions.d}`.
 - argv[0] dispatch: `px`, `s-proxy`, `silkrouter` (and `.exe` variants) are
-  identical.
+  identical; argv[0] only changes the name help and messages print.
+  `make install` installs `silkrouter` plus `px`/`s-proxy` symlinks into
+  `$(PREFIX)/bin` (`PREFIX ?= $(HOME)/.local`, `DESTDIR` supported).
 - Legacy `px.sh` style keeps working: if the first argument is not a known
   subcommand, the invocation is treated as `route` (so `px curl ifconfig.me`
   and `px -d 500 -s curl …` work). `px -- <cmd>` always routes, which is how a
-  command whose name matches a subcommand is run.
+  command whose name matches a subcommand is run. px.sh mode flags in first
+  position map to commands: `-B`/`--build` = build, `-R`/`--recache` =
+  recache, `-L`/`--list` = list, `-F FILE`/`--file FILE` = `build -F FILE`,
+  `--fresh` = `route -r`.
 
 ## Database (`internal/db`)
 
@@ -157,7 +232,10 @@ bubbletea + lipgloss + bubbles + glamour, modeled on
 
 ## Testing rules
 
-- Unit tests use `t.TempDir()` and set `SILKROUTER_HOME`.
+- Unit tests use `t.TempDir()` and set `SILKROUTER_HOME`. Tests that run a
+  `NeedsHome` command also set `TMPDIR` to a temp dir and clear `PX_LIST`, so
+  the first-run import never reads a real legacy cache (see `sandbox()` in
+  `main_test.go`).
 - No real network in unit tests except local fake servers / fake proxies.
 - Never run a real full scan of the whole list as a test; use small samples.
 - Never touch `~/.config/szmelc`, `~/.zshrc`, `~/.p10k.zsh` from tests or
