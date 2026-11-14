@@ -34,7 +34,21 @@ internal/proxy     protocol dialers (http/https/socks4/4a/5)
 internal/probe     validation probes
 internal/source    candidate lists
 internal/cache     legacy text cache
-internal/router    run a command through a proxy
-internal/scan      blacklist / anonymity checkers
+internal/router    run a command through a proxy (+ proxychains wrapper)
+internal/scan      full-scan engine, blacklist / anonymity checkers
+internal/reputation IP lists, DNS blacklists, geolocation
+internal/score     scores, ranks, heuristic tags
+internal/history   exit-code classes, tty, text log, time windows
+internal/shell     sessions, init scripts, rc blocks, subshell bootstrap
+internal/tui       interactive terminal UI
 internal/ui        colors and terminal helpers
+usage_track.go     usage log of routed commands
+packaging/         arch/PKGBUILD, nix/package.nix, nix/hm-module.nix (+ flake.nix)
 ```
+
+## Working on Windows
+
+The project targets Linux, but builds and tests on Windows too: keep LF line
+endings (`.gitattributes`; `git config core.autocrlf false`), and remember
+that Windows env var names are case-insensitive (`ALL_PROXY` and
+`all_proxy` are one variable there).

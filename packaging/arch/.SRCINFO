@@ -1,0 +1,25 @@
+pkgbase = silkrouter-git
+	pkgdesc = Route any command through fast, scanned and ranked proxies (px / s-proxy / silkrouter): SQLite proxy database, full scans, usage log, shell integration and TUI
+	pkgver = 4.0.0.r0.g0000000
+	pkgrel = 1
+	url = https://github.com/Szmelc-INC/SilkRouter
+	arch = x86_64
+	arch = aarch64
+	arch = armv7h
+	arch = i686
+	license = unknown
+	makedepends = git
+	makedepends = go>=2:1.26
+	optdepends = proxychains-ng: force every connection of a process tree through the proxy (px --chain, px shell --chain)
+	optdepends = zsh: shell integration with p10k segment (px shell install)
+	optdepends = zsh-theme-powerlevel10k: the silkrouter prompt segment
+	optdepends = bash-completion: bash completion
+	provides = silkrouter
+	provides = px
+	provides = s-proxy
+	conflicts = silkrouter
+	options = !lto
+	source = silkrouter::git+https://github.com/Szmelc-INC/SilkRouter.git#branch=feat/v4
+	sha256sums = SKIP
+
+pkgname = silkrouter-git

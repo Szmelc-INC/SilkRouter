@@ -76,13 +76,18 @@ completion, `paths`, `config get/show`, ...) never create anything.
   from that. Supported types: string, bool, ints, floats, `[]string`
   (comma-separated on the command line) and `config.Duration` (seconds or a
   Go duration; use it for every time value). Nested structs are tables.
-- Sections declared for later tasks (empty today): `[scan]`, `[tags]`,
-  `[history]`, `[shell]`, `[tui]`. Existing: `[cache]`, `[source]`,
-  `[probe]`, `[route]`, `[build]`, `[check]`, `[blcheck]`, `[proxycheck]`,
-  `[ui]`, `[db]` (`path`, `auto_import`, `batch_size`, `flush_interval`,
-  `busy_timeout`, `record`, `backup`, `list_limit`, `show_recent`; see
-  `config keys`). `Config.DBFile()` resolves `db.path` (default
-  `paths.DB()`); always use it instead of `paths.DB()`.
+- Sections: `[cache]`, `[source]`, `[probe]`, `[route]` (+ `prefer`,
+  `exclude_tags`, `method`, `proxychains`), `[build]`, `[check]`,
+  `[blcheck]`, `[proxycheck]`, `[ui]`, `[db]`, `[scan]` (workers, tries,
+  timeout, delay, probes, fail_fast, exit / https / judge / real-IP URLs,
+  protocols, dnsbl + zones, lists + names / ttl / custom_lists, geo,
+  mxtoolbox, wimia, resume, rank + weights, speed_ref_ms), `[tags]`
+  (thresholds of every heuristic tag), `[history]` (record, measure_on_use,
+  text_log, retention, list_limit, skip_commands), `[shell]` (verify,
+  no_proxy, log_commands, icon, color, prompt_format, prompt_auto, p10k,
+  method, shells), `[tui]`. `px config keys` lists them all.
+  `Config.DBFile()` resolves `db.path` (default `paths.DB()`); always use it
+  instead of `paths.DB()`.
 - `config.Load(path, os.LookupEnv)` = defaults < file < env (what commands
   get in `ctx.Config`); `config.LoadFile(path)` skips the env layer and is what
   anything that writes the file must use. A missing file is not an error;
@@ -131,8 +136,10 @@ completion, `paths`, `config get/show`, ...) never create anything.
   `GroupMeta` (help lists them in that order).
 - Dynamic completion values come from `cli.RegisterCompleter(topic, fn)`
   and are served by the hidden `px __complete <topic>` (topics today:
-  `commands`, `probes`, `config-keys`); use them with `Flag.Dynamic(topic)`
-  or `cli.ArgsDynamic(topic)`.
+  `commands`, `probes`, `config-keys`, `tags`, `used-commands`, `lists`);
+  use them with `Flag.Dynamic(topic)` or `cli.ArgsDynamic(topic)`.
+- New subcommand names must not shadow programs people route the px.sh way
+  (`px sh -c ...`, `px next build`): such aliases are not registered.
 - Global flags (before the command): `--config FILE`, `--home DIR`,
   `--no-color`, `-q/--quiet`, `-v/--verbose`, `--version`, `-h/--help`;
   `--no-color`, `-q`, `-v` also work after the command unless it defines the
@@ -231,6 +238,19 @@ scan_runs    id PK, mode, started_at, finished_at, total, done, cursor,
 meta         key PK, value
 ```
 
+Migration 2 ("full scans, usage counters") adds to `proxies`: `protocols`
+(schemes verified on host:port, comma-separated), `https_ok`, `jitter_ms`,
+`region`, `city`, `isp`, `hosting`, `mobile`, `full_scan_at`,
+`stable_score`, and the usage counters `use_count`, `use_ok`, `use_fail`,
+`use_proxy_err`, `last_used_at`, `last_cmd` (indexes on `last_used_at`,
+`full_scan_at`); to `usage_log`: `ms` (proxy latency measured during the
+command; index `(mode, ts_start)`); index `measurements (kind, ts)`. The
+usage counters are summary columns like the others: `FinishUsageWith` /
+`RecordUsage` bump them in the same transaction, `RebuildStats` recomputes
+them from `usage_log` (finished rows only). "Proxy error" exits are the
+err_classes timeout, refused, reset, dns, tls, auth, proto
+(`db.IsProxyErr`).
+
 Summary semantics (`summary.fold`): status follows the latest *inserted*
 fact (id order; ok -> alive, failure -> dead), so a producer that writes an
 older-timestamped fact after a newer one flips status to the older verdict;
@@ -256,10 +276,14 @@ d.FirstRun(ctx, db.FirstRunOptions{Builtin, CacheFile}) (db.FirstRunResult, erro
 d.GetProxy(ctx, id); d.GetProxyByAddr(ctx, a); d.GetProxyByURL(ctx, s)
 d.FindProxy(ctx, "42" | "#42" | URL | host[:port]); d.DeleteProxy(ctx, id)
 d.ListProxies(ctx, db.Filter) ([]*db.Proxy, error); d.CountProxies(ctx, db.Filter)
-d.SetScores(ctx, []db.SetScore{ProxyID, SpeedScore, CleanScore, Rank})  // T3 ranking
-d.SetGeo(ctx, id, country, asn, org, anonymity)
+d.SetScores(ctx, []db.SetScore{ProxyID, SpeedScore, CleanScore, StableScore, Rank}, clearOthers?)
+d.SetInfo(ctx, db.ProxyInfo{ProxyID|Addr, Country, Region, City, ASN, Org, ISP, Anonymity,
+          Hosting, Mobile, HTTPSOK, JitterMS, Protocols, FullScanAt})   // empty = unchanged
+d.SetGeo(ctx, id, country, asn, org, anonymity)                        // SetInfo shorthand
+d.RefreshListed(ctx)                                                    // after a scan
 db.Filter{IDs, Status, Schemes, MinMS, MaxMS, IncludeUntimed, Tag, TagScope,
           Countries, ListedMax *int, MinOKStreak, Source, Search, CheckedSince,
+          ExcludeTags, Anonymity, HTTPSOnly, AfterID, FullScanBefore,
           Sort, Reverse, Limit, Offset, WithTags}
 db.SortKeys(); db.ExpandSchemes([]string{"socks"}, httpGroup)
 db.AddrOf(proxy.Proxy); db.ParseAddr(s); (*db.Proxy).ToProxy()/URL()/Key()
@@ -270,9 +294,15 @@ d.RecordMeasurements(ctx, []db.Measurement); d.Measurements(ctx, proxyID, limit)
 d.RebuildStats(ctx) (db.RebuildResult, error); d.Stats(ctx) (*db.Stats, error)
 d.UpsertReputation(ctx, ...db.Reputation); d.ReputationFor(ctx, ips...)
 d.StartUsage(ctx, db.Usage) (id, error); d.SetUsagePreflight(ctx, id, ok, ms)
-d.FinishUsage(ctx, id, exitCode, errClass, end); d.ListUsage(ctx, db.UsageFilter); d.UsageCount(ctx, proxyID)
+d.FinishUsage(ctx, id, exitCode, errClass, end); d.FinishUsageWith(ctx, id, db.UsageEnd{ExitCode, ErrClass, End, MS})
+d.RecordUsage(ctx, db.Usage{... ExitCode})            // a finished command in one go (shell hooks)
+d.ListUsage(ctx, db.UsageFilter{ProxyID, Cmd, SessionID, Mode, ErrClass ok|fail|proxy|<class>,
+          Since, Until, Search, Limit, Offset}); d.CountUsage(ctx, f); d.UsageCount(ctx, proxyID)
+d.UsageStats(ctx, by []string /* db.UsageGroupKeys: proxy cmd err mode session tty cwd day hour week month */,
+          f, sort uses|last|fail|rate|key, limit) ([]db.UsageGroup, error); d.PruneUsage(ctx, before)
 d.SetTag/SetTags(ctx, db.Tag{ProxyID, Tag, Scope, Since, Reason}); d.ClearTag(ctx, id, tag, scope)
 d.ClearTags(ctx, tag, scope|"*"); d.ReplaceTags(ctx, tagNames, []db.Tag); d.Tags(ctx, id); d.TagCounts(ctx)
+d.ReplaceTagSet(ctx, db.TagSelection{Tags, ProxyIDs, Scope *string}, []db.Tag); d.TaggedProxies(ctx, tag, scope)
 d.CreateScanRun(ctx, db.ScanRun); d.UpdateScanRun(ctx, id, done, cursor, state, total)
 d.GetScanRun(ctx, id); d.ResumableScanRun(ctx, mode); d.ListScanRuns(ctx, limit)
 d.GetMeta/SetMeta(ctx, key, value); d.AllMeta(ctx)
@@ -280,8 +310,12 @@ d.Export(ctx, w, db.FormatList|FormatURLs|FormatCSV|FormatJSON, db.Filter)
 
 // bulk writer (scans)
 w := d.NewWriter(ctx, db.WriterOptions{BatchSize, FlushInterval, OnError})
-w.Measure(db.Measurement); w.Reputation(db.Reputation); w.Flush(); w.Close(); w.Stats(); w.Done()
+w.Measure(db.Measurement); w.Reputation(db.Reputation); w.Info(db.ProxyInfo)
+w.Flush(); w.Close(); w.Stats(); w.Done()
 ```
+
+A Writer batch applies measurements, then reputation verdicts, then
+ProxyInfo rows, in one transaction.
 
 The Writer's channel is unbuffered: a nil error from `Measure` means the
 writer owns the row. On `Close` or cancellation of its context it commits
@@ -305,7 +339,68 @@ create the file.
 `err_class` vocabulary: `timeout`, `refused`, `reset`, `dns`, `tls`, `auth`,
 `proto`, `http_status`, `exit_nonzero`, `other`.
 
-## Success semantics (usage log)
+## Scans (`internal/scan`, `internal/reputation`, `px scan`)
+
+- `scan.Engine` (engine.go) runs one mode over `[]scan.Target{ID, Proxy,
+  ExitIP}` with a worker pool and writes every fact into a `scan.Sink`
+  (`*db.Writer` implements it): `quick` (first probe), `full`, `reputation`,
+  `geo`, `protocols`. Measurements use kind `scan`; extra probe names:
+  `tcp`, `https`, `judge`, `proto`. Reports go to `Options.OnDone` from one
+  goroutine in completion order; a target interrupted by Ctrl-C produces no
+  report (the resumed run redoes it).
+- `full` per target: TCP connect (failure = one `tcp` fact, then only the
+  local lists); every probe x tries with `Delay` between checks, stopping
+  after `FailFast` fully failed probes; exit-IP probe; HTTPS (`https_url`,
+  Cloudflare trace parsed for ip / loc); judge (`judge_url`, graded by
+  `scan.Grade` against `RealIP`: transparent / anonymous / elite);
+  protocols (http CONNECT / socks5 / socks4 tunnels to `ProtoTarget`; a
+  working scheme other than the target's is recorded as a `proto` fact of
+  that address, which adds the row); reputation (lists + DNS blacklists,
+  each IP once per run via `reputation.Cache`); geo enqueued; one
+  `db.ProxyInfo` with anonymity, https_ok, jitter, protocols, full_scan_at.
+- Geolocation is batched by one goroutine (100 IPs or 5 s, paced for the
+  free ip-api tier) and always queried directly, never through a proxy. It
+  yields ProxyInfo (country code, region, city, ASN, org, ISP, hosting,
+  mobile) and two verdicts per IP: `ip-api:proxy` (kind api) and
+  `ip-api:hosting` (kind datacenter).
+- `reputation.Manager` downloads lists into `<home>/lists/<name>.txt` with a
+  `<name>.json` sidecar (fetched / checked times, entries, ETag,
+  Last-Modified, last error), conditional requests, `scan.lists_ttl`; a
+  failed download keeps the previous copy. Lists parse into merged IPv4
+  ranges (binary search) plus IPv6 prefixes. `reputation.DNSBL` resolves
+  `d.c.b.a.<zone>`: 127.0.0.0/8 = listed, NXDOMAIN = not listed,
+  127.255.255.x = refused (no verdict).
+- `px scan <mode>`: filters like `px proxies` (+ `--unscanned`,
+  `--older-than`), a `scan_runs` row whose `opts` identifies the selection
+  (same mode + same filters = resumable; `cursor` = the highest id below
+  which every target is done, saved every 2 s), `RefreshListed`, then
+  `score.Compute` and `score.RefreshTags` unless `--no-rank` / `--no-tags`.
+
+## Scores and heuristic tags (`internal/score`)
+
+- `score.Compute(ctx, d, Options{Mode, Weight*, SpeedRefMS, Recent})`
+  recomputes speed / clean / stable for every proxy from the last `Recent`
+  facts, the reputation rows of host + exit IP and the usage counters, and
+  ranks the alive ones (1 = best); dead / unknown get NULL rank. Speed =
+  100·ref/(ref + median + jitter/2); clean = 100 minus penalties (dnsbl 12
+  each up to 60, proxylist 20 up to 40, torexit 40, datacenter 10, ipset 15
+  up to 40, api 15 up to 30, transparent 40, anonymous 10, unknown 5, TLS
+  failure 5), NULL when never checked; stable = smoothed success rate
+  (0.7 facts + 0.3 usage).
+- `score.RefreshTags` replaces every heuristic tag (`score.HeuristicTags`)
+  in one transaction; `score.RefreshFor(proxyID, cmd)` recomputes one
+  proxy's tags and `recommended:<cmd>` after a use. Manual tags (anything
+  else) are never touched.
+- Rules (defaults, `[tags]`): `stable` last 10 facts ok; `fast` last 10
+  timed successes < 100 ms; `fav:<cmd>` >= 10 finished uses for cmd with
+  >= 80 % exit 0 (window `tags.window`); `recommended` top 5 by rank;
+  `recommended:<cmd>` top 5 alive, not blocked, used for cmd, by 0.6 ·
+  smoothed success · confidence + 0.3 speed + 0.1 clean; `clean`
+  full-scanned, listed_count 0, anonymous / elite; `elite`; `https`;
+  `flaky` alive with >= 10 facts and < 50 % ok; `tor`, `datacenter`,
+  `known` from the list kinds.
+
+## Usage log (`usage_track.go`, `internal/history`, `px history`)
 
 A route records two things separately: the **preflight** (did the proxy
 answer the check before running the command, and how fast) and the **command
@@ -313,41 +408,86 @@ exit code**. "Proxy success" for streaks and tags means the preflight or the
 measured connection succeeded; a non-zero exit is counted per command, but
 does not by itself mark the proxy as broken.
 
-## Heuristic tags (`internal/score`)
+- `usageTracker`: `onChosen` starts the row (proxy id, URL without
+  credentials, argv, cmd without `.exe`, cwd, tty, pid, ppid,
+  `$SILKROUTER_SESSION`, preflight) and, with `history.measure_on_use =
+  parallel`, measures the proxy while the command runs (`after`: once it
+  exited; `off`); `finish` waits at most 3 s for that probe, records it as a
+  `route` fact, finishes the row with `history.ClassifyExit(cmd, code)`
+  (curl / wget / ssh / aria2c / httpie exit codes mapped to err_classes),
+  appends the text log and runs `score.RefreshFor`. Tracking is best effort
+  and never changes the command or its exit code. `history.retention`
+  prunes at most once a day.
+- Shell hooks call the hidden `px __shell-log` in the background (mode
+  `shell`, start / end or duration, exit, cwd, tty, session);
+  `history.skip_commands` are not logged.
+- route order: `route.prefer` smart / rank / random (`orderPool`), tags via
+  `--tag` (bare `fav` matches every `fav:<cmd>`), `route.exclude_tags`;
+  `route.method = proxychains` / `--chain` wraps the command with
+  `router.ProxychainsWrap` (temporary config in `<home>/run`).
 
-Defaults (all configurable under `[tags]`):
-
-- `stable`: last 10 uses/checks all succeeded.
-- `fast`: last 10 successful measurements all under 100 ms.
-- `fav:<cmd>`: used at least 10 times for `<cmd>` with a success rate above
-  the threshold.
-- `clean`: listed on 0 reputation lists after a full check.
-- `recommended:<cmd>`: best combined score for a command.
-
-## Shell integration (`internal/shell`)
+## Shell integration (`internal/shell`, `cmd_shell.go`)
 
 - A child cannot change its parent's environment, so the entry point is
-  `eval "$(px shell-init zsh|bash)"`, which defines the `px on` / `px off`
-  shell functions wrapping the binary.
-- On-mode exports the proxy env vars plus `SILKROUTER_ACTIVE`,
-  `SILKROUTER_PROXY`, `SILKROUTER_SESSION`. Commands run while on are logged
-  through a `preexec`/`precmd` hook (mode `shell`).
-- The p10k segment reads environment variables only — no subprocess — so
-  instant prompt keeps working.
-- `px shell install` writes a marked block (with a backup) to rc files; it is
-  never run by tests and never edits real dotfiles during development.
+  `eval "$(px shell-init zsh|bash)"` / `px shell-init fish | source`, which
+  defines `px`, `s-proxy` and `silkrouter` functions around
+  `__silkrouter_wrap`: `on`, `off` and `rotate` run the binary with
+  `--emit <shell>` (and `SILKROUTER_SHELL_FN=1`) and eval its stdout;
+  everything else calls the binary.
+- On-mode exports the proxy env vars (upper and lower case), `NO_PROXY`,
+  and `SILKROUTER_ACTIVE`, `_PROXY` (URL), `_PROXY_KEY`, `_PROXY_ID`,
+  `_PROXY_MS`, `_PROXY_CC`, `_SESSION`, `_SINCE`, `_PROMPT`,
+  `_PROMPT_TEXT`, `_ICON`, `_COLOR`, `_LOG`, `_METHOD`; previous proxy
+  variables are saved as `_SILKROUTER_SAVED_*` once and restored by
+  `px off`. Sessions are JSON files in `<home>/run/sessions/` (0600).
+- Commands run while on are logged through `preexec` / `precmd` (zsh
+  add-zsh-hook, first in precmd_functions so `$?` is intact; bash
+  bash-preexec when loaded, else a DEBUG trap armed by the last
+  PROMPT_COMMAND entry; fish events) calling `px __shell-log` in the
+  background.
+- The p10k segment `prompt_silkrouter` (+ `instant_prompt_silkrouter`)
+  reads environment variables only — no subprocess — so instant prompt
+  keeps working; with `shell.p10k = left|right` a one-shot precmd inserts it
+  (before `vcs`, else after `dir`) and runs `p10k reload` once. Plain
+  prompts get a prefix (`shell.prompt_auto`).
+- `px shell` starts `$SHELL` with the session env and the integration
+  loaded on top of the user's rc (zsh: a private `ZDOTDIR` that sources the
+  real `.zshenv` / `.zshrc`; bash: `--rcfile`; fish: `-C`), optionally under
+  proxychains.
+- `px shell install` writes `<home>/shell/init.<shell>` and a marked block
+  (`# >>> silkrouter shell integration >>>`) with a backup to rc files.
+  Tests only run it with `--rc` on temp files; nothing ever edits real
+  dotfiles during development.
 
 ## TUI (`internal/tui`)
 
 bubbletea + lipgloss + bubbles + glamour, modeled on
 `~/Projects-4/ULTIMATE-TUI` (another module: copy patterns, do not import).
+See `docs/TUI.md` for views, keys and palette commands.
+
+## Packaging
+
+- `Makefile`: bare `make` prints the grouped, colored help generated from
+  `##@ Group` / `## target: description` comments; `install` honours
+  `PREFIX` / `DESTDIR` and installs binary, `px` / `s-proxy` links,
+  completions for all three names, `share/silkrouter/shell/init.*`,
+  `share/silkrouter/config.toml.example` and docs.
+- `packaging/arch/PKGBUILD` (+ `.SRCINFO`): `silkrouter-git`, CGO off, PIE
+  on x86_64 / aarch64, hermetic generation of completions / snippets /
+  example config, `check()` runs the tests.
+- `flake.nix` + `packaging/nix/package.nix` (buildGoModule, Go >= 1.26,
+  `vendorHash` refreshed with `make nix-hash` after go.mod changes) +
+  `packaging/nix/hm-module.nix` (`programs.silkrouter`).
 
 ## Testing rules
 
 - Unit tests use `t.TempDir()` and set `SILKROUTER_HOME`. Tests that run a
-  `NeedsHome` command also set `TMPDIR` to a temp dir and clear `PX_LIST`, so
-  the first-run import never reads a real legacy cache (see `sandbox()` in
-  `main_test.go`).
+  `NeedsHome` command also point `TMPDIR`, `TMP` and `TEMP` at a temp dir
+  (os.TempDir() on every platform) and clear `PX_LIST`, so the first-run
+  import never reads a real legacy cache (see `sandbox()` in
+  `main_test.go`). The sandbox also sets `history.measure_on_use = off`:
+  test proxies are fake, measuring them on use would mark them dead; tests
+  of the usage log turn it on against a local fake proxy.
 - No real network in unit tests except local fake servers / fake proxies.
 - Never run a real full scan of the whole list as a test; use small samples.
 - Never touch `~/.config/szmelc`, `~/.zshrc`, `~/.p10k.zsh` from tests or

@@ -32,6 +32,9 @@ type filterOpts struct {
 	limit     int
 	offset    int
 	all       bool
+	anonymity string
+	https     bool
+	exclude   string
 }
 
 // filterFlags declares the filter flags. paging adds -n/--offset/--all
@@ -52,6 +55,11 @@ func filterFlags(fs *cli.FlagSet, o *filterOpts, paging bool) {
 	fs.Int(&o.minStreak, "min-streak", 0, "at least N consecutive successes").Placeholder("N")
 	fs.String(&o.source, "source", "", "only proxies imported from this source").Placeholder("NAME")
 	fs.String(&o.search, "S,search", "", "substring of host, URL, exit IP, country, org or source").Placeholder("TEXT")
+	fs.String(&o.anonymity, "anonymity", "", "only these anonymity grades (comma-separated)").Placeholder("LIST").
+		Choices("elite", "anonymous", "transparent", "unknown")
+	fs.Bool(&o.https, "https", false, "only proxies whose HTTPS / TLS check succeeded")
+	fs.String(&o.exclude, "exclude-tag", "", "drop proxies carrying any of these tags (comma-separated)").
+		Placeholder("TAGS").Dynamic("tags")
 	defSort := ""
 	if paging {
 		defSort = "last_ms"
@@ -119,6 +127,21 @@ func (o *filterOpts) build(args []string) (db.Filter, error) {
 	if o.listedMax >= 0 {
 		n := o.listedMax
 		f.ListedMax = &n
+	}
+	for _, a := range strings.Split(o.anonymity, ",") {
+		if a = strings.TrimSpace(a); a == "" {
+			continue
+		}
+		if !contains([]string{"elite", "anonymous", "transparent", "unknown"}, a) {
+			return f, fmt.Errorf("unknown anonymity %q (want elite, anonymous, transparent or unknown)", a)
+		}
+		f.Anonymity = append(f.Anonymity, a)
+	}
+	f.HTTPSOnly = o.https
+	for _, t := range strings.Split(o.exclude, ",") {
+		if t = strings.TrimSpace(t); t != "" {
+			f.ExcludeTags = append(f.ExcludeTags, t)
+		}
 	}
 	search := append([]string{}, args...)
 	if o.search != "" {
