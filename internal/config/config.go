@@ -305,7 +305,7 @@ func Default() *Config {
 			LogCommands:  true,
 			Icon:         "\U000f048d", // nf-md-web (󰒍)
 			Color:        "208",
-			PromptFormat: "{icon} {scheme} {host}:{port} {ms}{cc}",
+			PromptFormat: "{icon} {scheme} {host}:{port} {ms} {cc}",
 			PromptAuto:   true,
 			P10K:         "left",
 			Method:       "env",

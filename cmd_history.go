@@ -44,6 +44,7 @@ type histOptions struct {
 	shExit  int
 	shCwd   string
 	shTTY   string
+	shDur   int64
 }
 
 var histOpts histOptions
@@ -190,6 +191,7 @@ the error classes seen.
 			fs.Int(&o.shExit, "exit", 0, "exit code")
 			fs.String(&o.shCwd, "cwd", "", "working directory")
 			fs.String(&o.shTTY, "tty", "", "terminal")
+			fs.Var((*int64Value)(&o.shDur), "duration", false, "duration in ms (instead of --start / --end)")
 		},
 		Run: runShellLog,
 	})
@@ -539,6 +541,10 @@ func runShellLog(ctx *cli.Context, args []string) int {
 	start, end := time.UnixMilli(o.shStart), time.UnixMilli(o.shEnd)
 	if o.shStart <= 0 {
 		start = time.Now()
+		if o.shDur > 0 {
+			end = time.Now()
+			start = end.Add(-time.Duration(o.shDur) * time.Millisecond)
+		}
 	}
 	if o.shEnd <= 0 || end.Before(start) {
 		end = start
