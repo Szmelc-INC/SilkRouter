@@ -23,6 +23,16 @@ not an ip
 2001:db8::/32
 ::ffff:8.8.8.8
 `
+	proxies := "198.51.100.10:8080\nsocks5://198.51.100.11:1080\nhttp://user:pw@198.51.100.12:3128\n[2001:db9::5]:1080\n"
+	ps, err := Parse(List{Name: "p", Kind: KindProxyList}, strings.NewReader(proxies))
+	if err != nil || ps.Entries != 4 {
+		t.Fatalf("proxy list: %v %d", err, ps.Entries)
+	}
+	for _, ip := range []string{"198.51.100.10", "198.51.100.11", "198.51.100.12", "2001:db9::5"} {
+		if !ps.Contains(netip.MustParseAddr(ip)) {
+			t.Errorf("proxy list: %s missing", ip)
+		}
+	}
 	s, err := Parse(List{Name: "t", Kind: KindIPSet}, strings.NewReader(src))
 	if err != nil {
 		t.Fatal(err)

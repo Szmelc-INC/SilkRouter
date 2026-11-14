@@ -260,10 +260,13 @@ the database; afterwards scores, ranks and tags are recomputed. Ctrl-C pauses,
 the next run with the same filters resumes.
 
 Built-in IP lists (cached in `<home>/lists`, refreshed after
-`scan.lists_ttl`): Tor exits, FireHOL proxies / anonymous / level1 / level2 /
-abusers, socks-proxy, sslproxies, proxylists, proxyrss, rosinstrument, X4BNet
-VPN and datacenter ranges, StopForumSpam, blocklist.de, Spamhaus DROP; add your
-own with `scan.custom_lists = ["name|proxylist|https://..."]`.
+`scan.lists_ttl`): Tor exits; known proxies from FireHOL (aggregate, large),
+socks-proxy, sslproxies and the public proxy lists of TheSpeedX (http / socks4
+/ socks5), monosans, proxifly, jetkai and clarketm; X4BNet VPN and datacenter
+ranges; abuse feeds FireHOL level1 / level2 / abusers, StopForumSpam,
+CleanTalk, blocklist.de, Spamhaus DROP. `scan.list_names` narrows them, and
+`scan.custom_lists = ["name|proxylist|https://..."]` adds your own (IP, CIDR,
+`ip:port` and `scheme://ip:port` lines are understood).
 
 Scores: **speed** = 100·ref/(ref + median + jitter/2) with `scan.speed_ref_ms`
 (250) scoring 50; **clean** = 100 minus penalties for DNS blacklists, known

@@ -47,22 +47,28 @@ const firehol = "https://raw.githubusercontent.com/firehol/blocklist-ipsets/mast
 // listed here is "known".
 var Builtin = []List{
 	{"tor-exits", KindTorExit, "https://check.torproject.org/torbulkexitlist", "Tor Project: current Tor exit relays"},
-	{"firehol-proxies", KindProxyList, firehol + "firehol_proxies.netset", "FireHOL: open proxies seen by proxy-list sites"},
-	{"firehol-anonymous", KindProxyList, firehol + "firehol_anonymous.netset", "FireHOL: anonymizers (proxies, VPNs, Tor)"},
-	{"socks-proxy", KindProxyList, firehol + "socks_proxy_7d.ipset", "socks-proxy.net: SOCKS proxies (7 days)"},
-	{"sslproxies", KindProxyList, firehol + "sslproxies_7d.ipset", "sslproxies.org: HTTPS proxies (7 days)"},
-	{"proxylists", KindProxyList, firehol + "proxylists_7d.ipset", "proxylists.net (7 days)"},
-	{"proxyrss", KindProxyList, firehol + "proxyrss_7d.ipset", "proxyrss.com (7 days)"},
-	{"ri-web-proxies", KindProxyList, firehol + "ri_web_proxies_30d.ipset", "rosinstrument web proxies (30 days)"},
+	{"firehol-proxies", KindProxyList, firehol + "firehol_proxies.netset", "FireHOL: open proxies seen by proxy-list sites (large)"},
+	{"socks-proxy", KindProxyList, firehol + "socks_proxy_30d.ipset", "socks-proxy.net: SOCKS proxies (30 days)"},
+	{"sslproxies", KindProxyList, firehol + "sslproxies_30d.ipset", "sslproxies.org: HTTPS proxies (30 days)"},
+	{"speedx-http", KindProxyList, speedx + "http.txt", "TheSpeedX/PROXY-List: public HTTP proxies"},
+	{"speedx-socks4", KindProxyList, speedx + "socks4.txt", "TheSpeedX/PROXY-List: public SOCKS4 proxies"},
+	{"speedx-socks5", KindProxyList, speedx + "socks5.txt", "TheSpeedX/PROXY-List: public SOCKS5 proxies"},
+	{"monosans", KindProxyList, "https://raw.githubusercontent.com/monosans/proxy-list/main/proxies/all.txt", "monosans/proxy-list: checked public proxies"},
+	{"proxifly", KindProxyList, "https://raw.githubusercontent.com/proxifly/free-proxy-list/main/proxies/all/data.txt", "proxifly/free-proxy-list: public proxies"},
+	{"jetkai", KindProxyList, "https://raw.githubusercontent.com/jetkai/proxy-list/main/online-proxies/txt/proxies.txt", "jetkai/proxy-list: online public proxies"},
+	{"clarketm", KindProxyList, "https://raw.githubusercontent.com/clarketm/proxy-list/master/proxy-list-raw.txt", "clarketm/proxy-list: public proxies"},
 	{"x4b-vpn", KindProxyList, "https://raw.githubusercontent.com/X4BNet/lists_vpn/main/output/vpn/ipv4.txt", "X4BNet: VPN provider ranges"},
 	{"x4b-datacenter", KindDatacenter, "https://raw.githubusercontent.com/X4BNet/lists_vpn/main/output/datacenter/ipv4.txt", "X4BNet: datacenter / hosting ranges"},
 	{"firehol-level1", KindIPSet, firehol + "firehol_level1.netset", "FireHOL level 1: attacks, malware, bogons"},
 	{"firehol-level2", KindIPSet, firehol + "firehol_level2.netset", "FireHOL level 2: attacks seen in the last 48h"},
 	{"firehol-abusers-1d", KindIPSet, firehol + "firehol_abusers_1d.netset", "FireHOL: abusers (1 day)"},
 	{"stopforumspam-7d", KindIPSet, firehol + "stopforumspam_7d.ipset", "StopForumSpam: spammers (7 days)"},
+	{"cleantalk-7d", KindIPSet, firehol + "cleantalk_7d.ipset", "CleanTalk: spam bots (7 days)"},
 	{"blocklist-de", KindIPSet, firehol + "blocklist_de.ipset", "blocklist.de: attackers reported by fail2ban"},
 	{"spamhaus-drop", KindIPSet, "https://www.spamhaus.org/drop/drop.txt", "Spamhaus DROP: hijacked / criminal netblocks"},
 }
+
+const speedx = "https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/"
 
 // ParseCustom parses "NAME|KIND|URL" (scan.custom_lists).
 func ParseCustom(s string) (List, error) {
@@ -136,8 +142,24 @@ func (s *Set) Contains(ip netip.Addr) bool {
 	return false
 }
 
-// Parse reads a list in any of the common formats: one IP or CIDR per line,
-// comments after '#' or ';', extra columns ignored ("1.2.0.0/16 ; SBL1").
+// listToken normalises one list entry: scheme:// and user:pass@ are
+// dropped and ip:port / [v6]:port lose the port.
+func listToken(tok string) string {
+	if i := strings.Index(tok, "://"); i >= 0 {
+		tok = tok[i+3:]
+	}
+	if i := strings.LastIndex(tok, "@"); i >= 0 {
+		tok = tok[i+1:]
+	}
+	if ap, err := netip.ParseAddrPort(tok); err == nil {
+		return ap.Addr().String()
+	}
+	return tok
+}
+
+// Parse reads a list in any of the common formats: one IP, CIDR, ip:port
+// or scheme://[user:pass@]ip:port per line, comments after '#' or ';',
+// extra columns ignored ("1.2.0.0/16 ; SBL1").
 func Parse(l List, r io.Reader) (*Set, error) {
 	s := &Set{List: l}
 	sc := bufio.NewScanner(r)
@@ -151,7 +173,7 @@ func Parse(l List, r io.Reader) (*Set, error) {
 		if len(f) == 0 {
 			continue
 		}
-		tok := f[0]
+		tok := listToken(f[0])
 		if p, err := netip.ParsePrefix(tok); err == nil {
 			s.add(p.Masked())
 			continue
