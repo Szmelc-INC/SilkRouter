@@ -295,7 +295,10 @@ func (d *DB) RebuildStats(ctx context.Context) (RebuildResult, error) {
 		if err := flush(); err != nil {
 			return err
 		}
-		_, err = tx.ExecContext(ctx, updateListedAllSQL)
+		if _, err = tx.ExecContext(ctx, updateListedAllSQL); err != nil {
+			return err
+		}
+		_, err = tx.ExecContext(ctx, rebuildUsageCountersSQL)
 		return err
 	})
 	res.Elapsed = time.Since(start)

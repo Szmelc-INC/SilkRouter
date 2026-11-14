@@ -30,7 +30,10 @@ type recorder struct {
 func testApp(t *testing.T) (*App, *recorder, *bytes.Buffer, *bytes.Buffer) {
 	t.Helper()
 	t.Setenv(paths.EnvHome, filepath.Join(t.TempDir(), "home"))
-	t.Setenv("TMPDIR", t.TempDir())
+	tmp := t.TempDir()
+	for _, k := range []string{"TMPDIR", "TMP", "TEMP"} { // os.TempDir() on every platform
+		t.Setenv(k, tmp)
+	}
 	t.Setenv("PX_LIST", "")
 	t.Setenv("NO_COLOR", "1")
 
@@ -344,7 +347,8 @@ func TestHomeFlag(t *testing.T) {
 	if paths.Home() != dir {
 		t.Fatalf("--home not applied: %s", paths.Home())
 	}
-	if !strings.Contains(out.String(), filepath.Join(dir, "config.toml")) {
+	cfg := filepath.Join(dir, "config.toml")
+	if !strings.Contains(out.String(), cfg) && !strings.Contains(out.String(), paths.Pretty(cfg)) {
 		t.Fatalf("help should show the config path under --home:\n%s", out.String())
 	}
 }

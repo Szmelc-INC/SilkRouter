@@ -56,6 +56,14 @@ type Options struct {
 	OnVerify func(p proxy.Proxy, res probe.Result)
 	// OnChosen, when set, is called with the proxy about to be used.
 	OnChosen func(p proxy.Proxy)
+	// Ordered keeps the order of Pool (preferred proxies first) instead of
+	// shuffling it; verification walks it in that order.
+	Ordered bool
+	// Wrap, when set, rewrites the command line for the chosen proxy (e.g.
+	// proxychains4 -f conf cmd...); cleanup runs after the command exits.
+	Wrap func(p proxy.Proxy, args []string) (wrapped []string, cleanup func(), err error)
+	// ExtraEnv is appended to the command's environment.
+	ExtraEnv []string
 }
 
 // Run picks a proxy per opts and executes args through it. It returns the
@@ -105,7 +113,18 @@ func Run(ctx context.Context, opts Options, args []string) (int, error) {
 		}
 	}
 
-	return runCommand(ctx, chosen, args, opts.Quiet)
+	run := args
+	if opts.Wrap != nil {
+		wrapped, cleanup, err := opts.Wrap(chosen, args)
+		if err != nil {
+			return 1, err
+		}
+		if cleanup != nil {
+			defer cleanup()
+		}
+		run = wrapped
+	}
+	return runCommand(ctx, chosen, run, args[0], opts.Quiet, opts.ExtraEnv)
 }
 
 // selectCandidates gathers the pool of proxies to consider, before filtering.
@@ -162,9 +181,11 @@ func selectCandidates(ctx context.Context, opts Options) ([]proxy.Proxy, error) 
 		filtered = append(filtered, p)
 	}
 
-	rand.Shuffle(len(filtered), func(i, j int) {
-		filtered[i], filtered[j] = filtered[j], filtered[i]
-	})
+	if !(opts.Ordered && opts.Pool != nil && !opts.Fresh) {
+		rand.Shuffle(len(filtered), func(i, j int) {
+			filtered[i], filtered[j] = filtered[j], filtered[i]
+		})
+	}
 	return filtered, nil
 }
 
@@ -221,15 +242,15 @@ func probeExitIP(ctx context.Context, p proxy.Proxy, timeout time.Duration) stri
 }
 
 // runCommand runs args with proxy env vars set, forwarding std streams, and
-// returns the child's exit code.
-func runCommand(ctx context.Context, p proxy.Proxy, args []string, quiet bool) (int, error) {
+// returns the child's exit code. name is the program shown in the banner.
+func runCommand(ctx context.Context, p proxy.Proxy, args []string, name string, quiet bool, extraEnv []string) (int, error) {
 	cmd := exec.CommandContext(ctx, args[0], args[1:]...)
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
-	cmd.Env = proxyEnv(os.Environ(), p.URL())
+	cmd.Env = append(ProxyEnv(os.Environ(), p.URL()), extraEnv...)
 
-	short := args[0]
+	short := name
 	if i := strings.LastIndexAny(short, `/\`); i >= 0 {
 		short = short[i+1:]
 	}
@@ -247,10 +268,13 @@ func runCommand(ctx context.Context, p proxy.Proxy, args []string, quiet bool) (
 	return 0, nil
 }
 
-// proxyEnv returns env with the standard proxy variables (upper+lower case) set
+// ProxyVars are the variables ProxyEnv sets.
+var ProxyVars = []string{"ALL_PROXY", "HTTP_PROXY", "HTTPS_PROXY", "all_proxy", "http_proxy", "https_proxy"}
+
+// ProxyEnv returns env with the standard proxy variables (upper+lower case) set
 // to url, replacing any pre-existing ones.
-func proxyEnv(base []string, url string) []string {
-	keys := []string{"ALL_PROXY", "HTTP_PROXY", "HTTPS_PROXY", "all_proxy", "http_proxy", "https_proxy"}
+func ProxyEnv(base []string, url string) []string {
+	keys := ProxyVars
 	skip := make(map[string]struct{}, len(keys))
 	for _, k := range keys {
 		skip[k] = struct{}{}

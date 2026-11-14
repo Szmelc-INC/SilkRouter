@@ -20,7 +20,10 @@ const proxyCols = `p.id, p.scheme, p.host, p.port, p.username, p.password, p.sou
 	p.added_at, p.last_seen_in_source, p.status, p.checked_at, p.last_ms, p.best_ms,
 	p.avg_ms, p.ms_count, p.ms_sum, p.ok_count, p.fail_count, p.ok_streak, p.fail_streak,
 	p.exit_ip, p.country, p.asn, p.org, p.anonymity, p.listed_count, p.speed_score,
-	p.clean_score, p.rank`
+	p.clean_score, p.rank,
+	p.protocols, p.https_ok, p.jitter_ms, p.region, p.city, p.isp, p.hosting, p.mobile,
+	p.full_scan_at, p.stable_score, p.use_count, p.use_ok, p.use_fail, p.use_proxy_err,
+	p.last_used_at, p.last_cmd`
 
 type scanner interface{ Scan(dest ...any) error }
 
@@ -29,11 +32,17 @@ func scanProxy(s scanner, extra ...any) (*Proxy, error) {
 	var added, seen, checked, lastMS, bestMS, rank sql.NullInt64
 	var avg, speed, clean sql.NullFloat64
 	var exitIP, country, asn, org sql.NullString
+	var protocols, region, city, isp, lastCmd sql.NullString
+	var httpsOK, hosting, mobile, fullScan, lastUsed sql.NullInt64
+	var jitter, stable sql.NullFloat64
 	dest := []any{&p.ID, &p.Scheme, &p.Host, &p.Port, &p.Username, &p.Password, &p.Source,
 		&added, &seen, &p.Status, &checked, &lastMS, &bestMS,
 		&avg, &p.MSCount, &p.MSSum, &p.OKCount, &p.FailCount, &p.OKStreak, &p.FailStreak,
 		&exitIP, &country, &asn, &org, &p.Anonymity, &p.ListedCount, &speed,
-		&clean, &rank}
+		&clean, &rank,
+		&protocols, &httpsOK, &jitter, &region, &city, &isp, &hosting, &mobile,
+		&fullScan, &stable, &p.UseCount, &p.UseOK, &p.UseFail, &p.UseProxyErr,
+		&lastUsed, &lastCmd}
 	if err := s.Scan(append(dest, extra...)...); err != nil {
 		return nil, err
 	}
@@ -41,6 +50,18 @@ func scanProxy(s scanner, extra ...any) (*Proxy, error) {
 	p.LastMS, p.BestMS = int(lastMS.Int64), int(bestMS.Int64)
 	p.AvgMS = avg.Float64
 	p.ExitIP, p.Country, p.ASN, p.Org = exitIP.String, country.String, asn.String, org.String
+	p.Region, p.City, p.ISP, p.LastCmd = region.String, city.String, isp.String, lastCmd.String
+	p.FullScanAt, p.LastUsedAt = fromMS(fullScan), fromMS(lastUsed)
+	if protocols.String != "" {
+		p.Protocols = strings.Split(protocols.String, ",")
+	}
+	p.HTTPSOK, p.Hosting, p.Mobile = nullBoolPtr(httpsOK), nullBoolPtr(hosting), nullBoolPtr(mobile)
+	if jitter.Valid {
+		p.JitterMS = &jitter.Float64
+	}
+	if stable.Valid {
+		p.StableScore = &stable.Float64
+	}
 	if speed.Valid {
 		p.SpeedScore = &speed.Float64
 	}
@@ -52,6 +73,28 @@ func scanProxy(s scanner, extra ...any) (*Proxy, error) {
 		p.Rank = &r
 	}
 	return &p, nil
+}
+
+func nullBoolPtr(v sql.NullInt64) *bool {
+	if !v.Valid {
+		return nil
+	}
+	b := v.Int64 != 0
+	return &b
+}
+
+func boolArg(b *bool) any {
+	if b == nil {
+		return nil
+	}
+	return *b
+}
+
+func floatArg(f *float64) any {
+	if f == nil {
+		return nil
+	}
+	return *f
 }
 
 const upsertProxySQL = `INSERT INTO proxies (scheme, host, port, username, password, source, added_at, last_seen_in_source)
@@ -339,17 +382,25 @@ func (d *DB) ListProxies(ctx context.Context, f Filter) ([]*Proxy, error) {
 
 // SetScore is one row for SetScores.
 type SetScore struct {
-	ProxyID    int64
-	SpeedScore *float64
-	CleanScore *float64
-	Rank       *int
+	ProxyID     int64
+	SpeedScore  *float64
+	CleanScore  *float64
+	StableScore *float64
+	Rank        *int
 }
 
-// SetScores writes speed_score, clean_score and rank (the scan engine's
-// ranking output) in one transaction. Nil fields are stored as NULL.
-func (d *DB) SetScores(ctx context.Context, scores []SetScore) error {
+// SetScores writes speed_score, clean_score, stable_score and rank (the
+// ranking output of internal/score) in one transaction. Nil fields are
+// stored as NULL. With clearOthers, every proxy not in scores loses its
+// rank (a fresh ranking replaces the previous one).
+func (d *DB) SetScores(ctx context.Context, scores []SetScore, clearOthers ...bool) error {
 	return d.Tx(ctx, func(tx *sql.Tx) error {
-		stmt, err := tx.PrepareContext(ctx, `UPDATE proxies SET speed_score = ?, clean_score = ?, rank = ? WHERE id = ?`)
+		if len(clearOthers) > 0 && clearOthers[0] {
+			if _, err := tx.ExecContext(ctx, `UPDATE proxies SET rank = NULL WHERE rank IS NOT NULL`); err != nil {
+				return err
+			}
+		}
+		stmt, err := tx.PrepareContext(ctx, `UPDATE proxies SET speed_score = ?, clean_score = ?, stable_score = ?, rank = ? WHERE id = ?`)
 		if err != nil {
 			return err
 		}
@@ -359,14 +410,8 @@ func (d *DB) SetScores(ctx context.Context, scores []SetScore) error {
 			if s.Rank != nil {
 				rank = *s.Rank
 			}
-			var sp, cl any
-			if s.SpeedScore != nil {
-				sp = *s.SpeedScore
-			}
-			if s.CleanScore != nil {
-				cl = *s.CleanScore
-			}
-			if _, err := stmt.ExecContext(ctx, sp, cl, rank, s.ProxyID); err != nil {
+			if _, err := stmt.ExecContext(ctx, floatArg(s.SpeedScore), floatArg(s.CleanScore),
+				floatArg(s.StableScore), rank, s.ProxyID); err != nil {
 				return err
 			}
 		}
@@ -374,14 +419,75 @@ func (d *DB) SetScores(ctx context.Context, scores []SetScore) error {
 	})
 }
 
+const setInfoSQL = `UPDATE proxies SET
+	country      = coalesce(?, country),
+	region       = coalesce(?, region),
+	city         = coalesce(?, city),
+	asn          = coalesce(?, asn),
+	org          = coalesce(?, org),
+	isp          = coalesce(?, isp),
+	anonymity    = coalesce(?, anonymity),
+	hosting      = coalesce(?, hosting),
+	mobile       = coalesce(?, mobile),
+	https_ok     = coalesce(?, https_ok),
+	jitter_ms    = coalesce(?, jitter_ms),
+	protocols    = coalesce(?, protocols),
+	full_scan_at = coalesce(?, full_scan_at)
+	WHERE id = ?`
+
+// infoTx applies ProxyInfo rows inside tx (resolving Addr when ProxyID is
+// 0; unknown addresses are created).
+func infoTx(ctx context.Context, tx *sql.Tx, infos []ProxyInfo) error {
+	stmt, err := tx.PrepareContext(ctx, setInfoSQL)
+	if err != nil {
+		return err
+	}
+	defer stmt.Close()
+	var upsert *sql.Stmt
+	defer func() {
+		if upsert != nil {
+			upsert.Close()
+		}
+	}()
+	now := nowFunc()
+	for i := range infos {
+		in := &infos[i]
+		if in.ProxyID == 0 {
+			if upsert == nil {
+				if upsert, err = tx.PrepareContext(ctx, upsertProxySQL); err != nil {
+					return err
+				}
+			}
+			if in.ProxyID, err = upsertProxyTx(ctx, upsert, in.Addr, "", now, time.Time{}); err != nil {
+				return err
+			}
+		}
+		var protocols any
+		if in.Protocols != nil {
+			protocols = strings.Join(in.Protocols, ",")
+		}
+		if _, err := stmt.ExecContext(ctx, nullStr(in.Country), nullStr(in.Region), nullStr(in.City),
+			nullStr(in.ASN), nullStr(in.Org), nullStr(in.ISP), nullStr(in.Anonymity),
+			boolArg(in.Hosting), boolArg(in.Mobile), boolArg(in.HTTPSOK), floatArg(in.JitterMS),
+			protocols, ms(in.FullScanAt), in.ProxyID); err != nil {
+			return fmt.Errorf("db: info for proxy #%d: %w", in.ProxyID, err)
+		}
+	}
+	return nil
+}
+
+// SetInfo stores what a scan learned about proxies (geo, anonymity,
+// protocols, ...) in one transaction. Bulk scans use Writer.Info instead.
+func (d *DB) SetInfo(ctx context.Context, infos ...ProxyInfo) error {
+	if len(infos) == 0 {
+		return nil
+	}
+	return d.Tx(ctx, func(tx *sql.Tx) error { return infoTx(ctx, tx, infos) })
+}
+
 // SetGeo stores what was learned about a proxy's exit (country, ASN, org,
-// anonymity). Empty strings leave the column unchanged.
+// anonymity). Empty strings leave the column unchanged. SetInfo covers
+// every scan-learned column.
 func (d *DB) SetGeo(ctx context.Context, id int64, country, asn, org, anonymity string) error {
-	_, err := d.sql.ExecContext(ctx, `UPDATE proxies SET
-		country   = coalesce(?, country),
-		asn       = coalesce(?, asn),
-		org       = coalesce(?, org),
-		anonymity = coalesce(?, anonymity)
-		WHERE id = ?`, nullStr(country), nullStr(asn), nullStr(org), nullStr(anonymity), id)
-	return err
+	return d.SetInfo(ctx, ProxyInfo{ProxyID: id, Country: country, ASN: asn, Org: org, Anonymity: anonymity})
 }

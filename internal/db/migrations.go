@@ -25,6 +25,44 @@ type Migration struct {
 // migrations is the ordered list of schema steps.
 var migrations = []Migration{
 	{Version: 1, Name: "core schema", Up: execAll(schemaV1...)},
+	{Version: 2, Name: "full scans, usage counters", Up: execAll(schemaV2...)},
+}
+
+// schemaV2 adds what full scans learn about a proxy and the per-proxy usage
+// counters:
+//   - proxies.protocols: schemes verified on host:port (comma-separated),
+//   - proxies.https_ok: a TLS request through the proxy worked (CONNECT),
+//   - proxies.jitter_ms: standard deviation of the last full scan's samples,
+//   - proxies.region/city/isp/hosting/mobile: geolocation of the exit IP,
+//   - proxies.full_scan_at: when the last full scan finished it,
+//   - proxies.stable_score: stability score (0-100) beside speed/clean,
+//   - proxies.use_*: usage counters (uses, exit 0, exit != 0, exits that
+//     look like a proxy / network error), last use and its command. They are
+//     denormalised from usage_log like the other summary columns and
+//     rebuilt by RebuildStats,
+//   - usage_log.ms: proxy latency measured while that command ran.
+var schemaV2 = []string{
+	`ALTER TABLE proxies ADD COLUMN protocols TEXT`,
+	`ALTER TABLE proxies ADD COLUMN https_ok INTEGER`,
+	`ALTER TABLE proxies ADD COLUMN jitter_ms REAL`,
+	`ALTER TABLE proxies ADD COLUMN region TEXT`,
+	`ALTER TABLE proxies ADD COLUMN city TEXT`,
+	`ALTER TABLE proxies ADD COLUMN isp TEXT`,
+	`ALTER TABLE proxies ADD COLUMN hosting INTEGER`,
+	`ALTER TABLE proxies ADD COLUMN mobile INTEGER`,
+	`ALTER TABLE proxies ADD COLUMN full_scan_at INTEGER`,
+	`ALTER TABLE proxies ADD COLUMN stable_score REAL`,
+	`ALTER TABLE proxies ADD COLUMN use_count INTEGER NOT NULL DEFAULT 0`,
+	`ALTER TABLE proxies ADD COLUMN use_ok INTEGER NOT NULL DEFAULT 0`,
+	`ALTER TABLE proxies ADD COLUMN use_fail INTEGER NOT NULL DEFAULT 0`,
+	`ALTER TABLE proxies ADD COLUMN use_proxy_err INTEGER NOT NULL DEFAULT 0`,
+	`ALTER TABLE proxies ADD COLUMN last_used_at INTEGER`,
+	`ALTER TABLE proxies ADD COLUMN last_cmd TEXT`,
+	`CREATE INDEX proxies_last_used_at ON proxies (last_used_at)`,
+	`CREATE INDEX proxies_full_scan_at ON proxies (full_scan_at)`,
+	`ALTER TABLE usage_log ADD COLUMN ms INTEGER`,
+	`CREATE INDEX usage_log_mode_ts ON usage_log (mode, ts_start)`,
+	`CREATE INDEX measurements_kind_ts ON measurements (kind, ts)`,
 }
 
 // execAll returns an Up func that executes each statement in order.

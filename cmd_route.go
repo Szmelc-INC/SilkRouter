@@ -2,16 +2,21 @@ package main
 
 import (
 	"bufio"
+	"context"
 	"errors"
 	"fmt"
 	"io"
+	"math/rand"
 	"os"
 	"os/exec"
+	"path/filepath"
+	"sort"
 	"strings"
 
 	"github.com/szmelc-inc/silkrouter/internal/cli"
 	"github.com/szmelc-inc/silkrouter/internal/config"
 	"github.com/szmelc-inc/silkrouter/internal/db"
+	"github.com/szmelc-inc/silkrouter/internal/paths"
 	"github.com/szmelc-inc/silkrouter/internal/probe"
 	"github.com/szmelc-inc/silkrouter/internal/proxy"
 	"github.com/szmelc-inc/silkrouter/internal/router"
@@ -34,6 +39,14 @@ var routeOpts struct {
 	testURL    string
 	srcURL     string
 	autoBuild  bool
+	tag        string
+	exclude    string
+	best       bool
+	forCmd     string
+	prefer     string
+	method     string
+	chain      bool
+	noLog      bool
 }
 
 func init() {
@@ -55,7 +68,22 @@ options work in front of it ("px -d 500 -s curl ..."). Use "px -- <command>"
 to route a program whose name matches a subcommand.
 
 When there is nothing tested to pick from, route offers to build; decline and it grabs
-an untested proxy straight from the source (verified first).`,
+an untested proxy straight from the source (verified first).
+
+Pick order (route.prefer): smart tries the proxies tagged recommended:<cmd>
+and fav:<cmd> for this program first, then the globally recommended ones,
+then everything else at random; rank walks the best ranked first (--best);
+random is the px.sh behaviour. Proxies tagged with route.exclude_tags
+(default: blocked) are never used.
+
+Every routed command is recorded in the usage log (px history): when, which
+proxy, the command line, cwd, tty, session, preflight, exit code, duration
+and the proxy latency measured while it ran (history.measure_on_use), which
+also updates the proxy's "recent delay", counters and tags.
+
+--chain (route.method = proxychains) runs the command under proxychains-ng:
+every TCP connection of the whole process tree goes through the proxy, even
+for programs that ignore the proxy variables.`,
 		Usage:       "[options] [--] <command> [args...]",
 		Args:        cli.ArgsCommand,
 		PassThrough: true,
@@ -67,6 +95,10 @@ an untested proxy straight from the source (verified first).`,
 			{Cmd: "-s -d 500 git pull", Desc: "socks proxies under 500 ms only"},
 			{Cmd: "route -c -v -- wget https://example.com", Desc: "verify the pick first and print its exit IP"},
 			{Cmd: "-- build.sh", Desc: "route a program that shares a subcommand's name"},
+			{Cmd: "--best yt-dlp URL", Desc: "best ranked proxy that answers"},
+			{Cmd: "--tag fast,elite curl -s https://ifconfig.me", Desc: "only proxies tagged fast or elite"},
+			{Cmd: "--for git -- ./deploy.sh", Desc: "use git's favourite proxies for another program"},
+			{Cmd: "--chain nmap -sT example.com", Desc: "every connection of the process tree (proxychains)"},
 		},
 		Run: runRoute,
 	})
@@ -100,6 +132,19 @@ func routeFlags(fs *cli.FlagSet) {
 		Placeholder("URL").ConfigKey("source.url")
 	fs.Bool(&o.autoBuild, "build", cfg.Route.AutoBuild, "build the cache without asking when it is missing").
 		ConfigKey("route.auto_build")
+	fs.String(&o.tag, "T,tag", "", "only proxies carrying one of these tags (TAG or TAG:SCOPE, comma-separated)").
+		Placeholder("TAGS").Dynamic("tags")
+	fs.String(&o.exclude, "exclude-tag", strings.Join(cfg.Route.ExcludeTags, ","), "never use proxies with these tags").
+		Placeholder("TAGS").Dynamic("tags").ConfigKey("route.exclude_tags")
+	fs.Bool(&o.best, "b,best", false, "best ranked first (same as --prefer rank)")
+	fs.String(&o.forCmd, "for", "", "pick for this command's recommendations / favourites (default: the program)").
+		Placeholder("CMD").Dynamic("used-commands")
+	fs.String(&o.prefer, "prefer", cfg.Route.Prefer, "pick order").Placeholder("ORDER").
+		Choices("smart", "rank", "random").ConfigKey("route.prefer")
+	fs.String(&o.method, "method", cfg.Route.Method, "how the command is proxied").Placeholder("METHOD").
+		Choices("env", "proxychains").ConfigKey("route.method")
+	fs.Bool(&o.chain, "chain,proxychains", false, "run under proxychains (same as --method proxychains)")
+	fs.Bool(&o.noLog, "no-log", !cfg.History.Record, "do not record this command in the usage log").ConfigKey("history.record")
 }
 
 func runRoute(ctx *cli.Context, args []string) int {
@@ -168,7 +213,9 @@ func runRoute(ctx *cli.Context, args []string) int {
 	}
 	filter := db.Filter{
 		Status: []string{db.StatusAlive}, MinMS: o.minMS, MaxMS: o.maxMS, IncludeUntimed: true,
+		ExcludeTags: splitList(o.exclude), WithTags: true,
 	}
+	wantTags := splitList(o.tag)
 	switch {
 	case httpOnly:
 		filter.Schemes = db.ExpandSchemes([]string{"http"}, true)
@@ -246,24 +293,65 @@ func runRoute(ctx *cli.Context, args []string) int {
 			ctx.Errorf("%v", err)
 			return 1
 		}
+		if len(wantTags) > 0 {
+			rows = withAnyTag(rows, wantTags)
+		}
+		prefer := o.prefer
+		if o.best {
+			prefer = "rank"
+		}
+		forCmd := o.forCmd
+		if forCmd == "" {
+			forCmd = filepath.Base(strings.ReplaceAll(args[0], `\`, "/"))
+			forCmd = strings.TrimSuffix(forCmd, ".exe")
+		}
+		rows = orderPool(rows, prefer, forCmd)
+		opts.Ordered = prefer != "random"
 		opts.Pool = make([]proxy.Proxy, 0, len(rows))
 		for _, p := range rows {
 			opts.Pool = append(opts.Pool, p.ToProxy())
 		}
 		opts.PoolLabel = "database"
-	}
-	if d != nil && cfg.DB.Record {
-		opts.OnVerify = func(p proxy.Proxy, r probe.Result) {
-			if _, err := d.RecordMeasurement(ctx, db.Measurement{
-				Addr: db.AddrOf(p), Kind: db.KindPreflight, Probe: pr.Name, OK: r.OK,
-				MS: r.LatencyMS, ErrClass: probe.ClassifyErr(r.Err), ExitIP: r.ExitIP,
-			}); err != nil {
-				ctx.Debugf("database: %v", err)
-			}
+		if len(wantTags) > 0 {
+			opts.PoolLabel += " tag=" + o.tag
 		}
+	}
+	method := o.method
+	if o.chain {
+		method = router.MethodProxychains
+	}
+	if method == router.MethodProxychains {
+		if _, err := router.FindProxychains(cfg.Route.Proxychains); err != nil {
+			ctx.Errorf("%v", err)
+			return 1
+		}
+		opts.Wrap = router.ProxychainsWrap(cfg.Route.Proxychains, paths.RunDir())
+	}
+
+	var track *usageTracker
+	if !o.noLog {
+		track = newUsageTracker(ctx, d, pr, o.vtimeout.D(), args, db.ModeRoute)
+	}
+	recordVerify := d != nil && cfg.DB.Record
+	opts.OnVerify = func(p proxy.Proxy, r probe.Result) {
+		track.onVerify(p, r)
+		if !recordVerify {
+			return
+		}
+		if _, err := d.RecordMeasurement(context.WithoutCancel(ctx), db.Measurement{
+			Addr: db.AddrOf(p), Kind: db.KindPreflight, Probe: pr.Name, OK: r.OK,
+			MS: r.LatencyMS, ErrClass: probe.ClassifyErr(r.Err), ExitIP: r.ExitIP,
+		}); err != nil {
+			ctx.Debugf("database: %v", err)
+		}
+	}
+	opts.OnChosen = track.onChosen
+	if sess := os.Getenv("SILKROUTER_SESSION"); sess != "" {
+		opts.ExtraEnv = append(opts.ExtraEnv, "SILKROUTER_SESSION="+sess)
 	}
 
 	code, err := router.Run(ctx, opts, args)
+	track.finish(code)
 	if err != nil {
 		if errors.Is(err, router.ErrNoCache) {
 			if d != nil {
@@ -276,6 +364,94 @@ func runRoute(ctx *cli.Context, args []string) int {
 		ctx.Errorf("%v", err)
 	}
 	return code
+}
+
+// splitList splits a comma-separated flag value (empty items dropped).
+func splitList(s string) []string {
+	var out []string
+	for _, v := range strings.Split(s, ",") {
+		if v = strings.TrimSpace(v); v != "" {
+			out = append(out, v)
+		}
+	}
+	return out
+}
+
+// withAnyTag keeps the rows carrying at least one of tags (labels "tag" or
+// "tag:scope"; a bare "fav" also matches every "fav:<cmd>").
+func withAnyTag(rows []*db.Proxy, tags []string) []*db.Proxy {
+	out := rows[:0:0]
+	for _, p := range rows {
+		if hasAnyTag(p, tags) {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
+func hasAnyTag(p *db.Proxy, tags []string) bool {
+	for _, have := range p.Tags {
+		for _, want := range tags {
+			if have == want || (!strings.Contains(want, ":") && strings.HasPrefix(have, want+":")) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// orderPool orders route candidates:
+//
+//   - rank: best ranked first (unranked last, by latency),
+//   - smart: recommended:<cmd>, then fav:<cmd>, then recommended, then
+//     everything else; each group shuffled so load spreads,
+//   - random: unchanged (router shuffles).
+func orderPool(rows []*db.Proxy, prefer, cmd string) []*db.Proxy {
+	switch prefer {
+	case "rank":
+		out := append([]*db.Proxy(nil), rows...)
+		sort.SliceStable(out, func(i, j int) bool {
+			a, b := out[i].Rank, out[j].Rank
+			switch {
+			case a != nil && b != nil:
+				return *a < *b
+			case a != nil:
+				return true
+			case b != nil:
+				return false
+			}
+			return fmtMSKey(out[i].LastMS) < fmtMSKey(out[j].LastMS)
+		})
+		return out
+	case "smart":
+		groups := make([][]*db.Proxy, 4)
+		for _, p := range rows {
+			switch {
+			case p.HasTag("recommended:" + cmd):
+				groups[0] = append(groups[0], p)
+			case p.HasTag("fav:" + cmd):
+				groups[1] = append(groups[1], p)
+			case p.HasTag("recommended"):
+				groups[2] = append(groups[2], p)
+			default:
+				groups[3] = append(groups[3], p)
+			}
+		}
+		out := make([]*db.Proxy, 0, len(rows))
+		for _, g := range groups {
+			rand.Shuffle(len(g), func(i, j int) { g[i], g[j] = g[j], g[i] })
+			out = append(out, g...)
+		}
+		return out
+	}
+	return rows
+}
+
+func fmtMSKey(ms int) int {
+	if ms <= 0 {
+		return 1 << 30
+	}
+	return ms
 }
 
 // askYesNo prompts on w and reads a Y/n answer from r. Defaults to yes on

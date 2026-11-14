@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -19,7 +20,11 @@ import (
 func TestMain(m *testing.M) {
 	if out := os.Getenv("SILK_HELPER_OUT"); out != "" {
 		_ = os.WriteFile(out, []byte(os.Getenv("ALL_PROXY")+"|"+strings.Join(os.Args[1:], " ")), 0o600)
-		os.Exit(7)
+		code := 7
+		if v := os.Getenv("SILK_HELPER_EXIT"); v != "" {
+			fmt.Sscan(v, &code)
+		}
+		os.Exit(code)
 	}
 	os.Exit(m.Run())
 }
@@ -29,13 +34,28 @@ func sandbox(t *testing.T) {
 	t.Helper()
 	t.Setenv(paths.EnvHome, filepath.Join(t.TempDir(), "home"))
 	t.Setenv(paths.EnvConfig, "")
-	t.Setenv("TMPDIR", t.TempDir())
+	sandboxTemp(t)
 	t.Setenv("PX_LIST", "")
 	t.Setenv("NO_COLOR", "1")
 	for _, kv := range os.Environ() {
 		if k, _, _ := strings.Cut(kv, "="); strings.HasPrefix(k, "SILKROUTER_") && k != paths.EnvHome && k != paths.EnvConfig {
 			t.Setenv(k, "")
 		}
+	}
+	// Test proxies are fake (closed local ports): measuring them on use
+	// would mark them dead. Tests that cover the measurement turn it on.
+	t.Setenv("SILKROUTER_HISTORY_MEASURE_ON_USE", "off")
+	t.Setenv("SILKROUTER_TTY", "")
+}
+
+// sandboxTemp points os.TempDir() at a fresh temp dir on every platform
+// (TMPDIR on Unix, TMP/TEMP on Windows), so the first-run import never sees
+// a real legacy cache and tests never write into the real temp dir.
+func sandboxTemp(t *testing.T) {
+	t.Helper()
+	tmp := t.TempDir()
+	for _, k := range []string{"TMPDIR", "TMP", "TEMP"} {
+		t.Setenv(k, tmp)
 	}
 }
 

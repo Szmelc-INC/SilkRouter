@@ -81,6 +81,10 @@ type RouteConfig struct {
 	VerifyTimeout Duration `toml:"verify_timeout" help:"timeout of one verification"`
 	AutoBuild     bool     `toml:"auto_build" help:"build the cache without asking when it is missing"`
 	Pool          string   `toml:"pool" help:"where route picks proxies: the database, or the legacy text cache" choices:"db|cache"`
+	Prefer        string   `toml:"prefer" help:"pick order: smart = recommended:/fav:<cmd> first then random, rank = best ranked first, random" choices:"smart|rank|random"`
+	ExcludeTags   []string `toml:"exclude_tags" help:"never route through proxies carrying one of these tags"`
+	Method        string   `toml:"method" help:"how the command is proxied: env = proxy variables, proxychains = proxychains4 (every TCP connection of the process tree)" choices:"env|proxychains"`
+	Proxychains   string   `toml:"proxychains" help:"proxychains binary (empty = proxychains4, then proxychains)"`
 }
 
 // BuildConfig configures cache builds.
@@ -129,20 +133,91 @@ type DBConfig struct {
 	ShowRecent    int      `toml:"show_recent" help:"recent measurements shown by 'px show'" min:"0"`
 }
 
-// ScanConfig is reserved for full-scan settings.
-type ScanConfig struct{}
+// ScanConfig configures 'px scan' (quick / full / reputation / geo / protocols).
+type ScanConfig struct {
+	Workers      int      `toml:"workers" help:"proxies scanned in parallel (full scans stay gentle)" min:"1"`
+	QuickWorkers int      `toml:"quick_workers" help:"proxies tested in parallel by 'scan quick'" min:"1"`
+	Tries        int      `toml:"tries" help:"samples per probe in a full scan (latency and jitter)" min:"1"`
+	Timeout      Duration `toml:"timeout" help:"timeout of one check"`
+	Delay        Duration `toml:"delay" help:"pause between two checks of the same proxy (gentle mode)"`
+	Probes       []string `toml:"probes" help:"connectivity probes a full scan runs on every proxy (px probes)"`
+	FailFast     int      `toml:"fail_fast" help:"stop checking a proxy after this many probes failed completely (0 = never)" min:"0"`
+	ExitProbe    string   `toml:"exit_probe" help:"probe that reveals the exit IP"`
+	HTTPSURL     string   `toml:"https_url" help:"HTTPS URL fetched through the proxy (TLS / CONNECT check; Cloudflare trace also yields the exit country)"`
+	JudgeURL     string   `toml:"judge_url" help:"header-echo URL that grades anonymity (transparent / anonymous / elite)"`
+	RealIPURL    string   `toml:"real_ip_url" help:"URL fetched directly (no proxy) once per scan to learn your real IP"`
+	Protocols    bool     `toml:"protocols" help:"also detect which protocols each address speaks (http, socks4, socks5)"`
+	DNSBL        bool     `toml:"dnsbl" help:"look exit IPs up on DNS blacklists"`
+	DNSBLZones   []string `toml:"dnsbl_zones" help:"DNS blacklist zones queried"`
+	DNSTimeout   Duration `toml:"dns_timeout" help:"timeout of one DNS blacklist lookup"`
+	Lists        bool     `toml:"lists" help:"match IPs against downloaded known-proxy / tor / abuse / datacenter lists"`
+	ListNames    []string `toml:"list_names" help:"lists used by scans (px lists shows all; empty = every built-in list)"`
+	ListsTTL     Duration `toml:"lists_ttl" help:"re-download a list when the local copy is older than this"`
+	CustomLists  []string `toml:"custom_lists" help:"extra IP lists, each NAME|KIND|URL (kind: ipset, proxylist, torexit, datacenter)"`
+	Geo          string   `toml:"geo" help:"geolocation / ASN provider queried directly for exit IPs" choices:"ip-api|none"`
+	GeoURL       string   `toml:"geo_url" help:"ip-api compatible batch endpoint"`
+	MXToolbox    bool     `toml:"mxtoolbox" help:"also run the mxtoolbox blacklist lookup in full scans (slow, scraped)"`
+	WIMIA        bool     `toml:"wimia" help:"also run the whatismyipaddress proxy check in full scans (often Cloudflare-blocked)"`
+	Resume       bool     `toml:"resume" help:"resume an interrupted scan of the same mode unless --restart is given"`
+	Rank         string   `toml:"rank" help:"order the rank column follows after a scan" choices:"balanced|speed|clean|stable"`
+	WeightSpeed  float64  `toml:"weight_speed" help:"weight of the speed score in the balanced rank" min:"0"`
+	WeightClean  float64  `toml:"weight_clean" help:"weight of the clean (reputation / anonymity) score in the balanced rank" min:"0"`
+	WeightStable float64  `toml:"weight_stable" help:"weight of the stability score in the balanced rank" min:"0"`
+	SpeedRefMS   int      `toml:"speed_ref_ms" help:"latency that scores 50/100 on speed (lower = stricter)" min:"1"`
+}
 
-// TagsConfig is reserved for heuristic tag thresholds.
-type TagsConfig struct{}
+// TagsConfig configures the heuristic tags (stable, fast, fav:<cmd>, ...).
+type TagsConfig struct {
+	Auto          bool     `toml:"auto" help:"refresh the tags of a proxy after every use and of everything after a scan"`
+	StableN       int      `toml:"stable_n" help:"stable: the last N checks / uses all succeeded" min:"1"`
+	FastN         int      `toml:"fast_n" help:"fast: the last N timed successes ..." min:"1"`
+	FastMS        int      `toml:"fast_ms" help:"... were all under this many ms" min:"1"`
+	FavMinUses    int      `toml:"fav_min_uses" help:"fav:<cmd>: used at least N times for <cmd> ..." min:"1"`
+	FavMinRate    float64  `toml:"fav_min_rate" help:"... with at least this success rate (0-1)" min:"0"`
+	RecommendTop  int      `toml:"recommend_top" help:"recommended / recommended:<cmd>: how many proxies get the tag" min:"0"`
+	FlakyMinFacts int      `toml:"flaky_min_facts" help:"flaky: at least N facts ..." min:"1"`
+	FlakyMaxRate  float64  `toml:"flaky_max_rate" help:"... with a success rate below this (0-1)" min:"0"`
+	Window        Duration `toml:"window" help:"usage window for fav / recommended tags (0 = all history)"`
+}
 
-// HistoryConfig is reserved for usage-log settings.
-type HistoryConfig struct{}
+// HistoryConfig configures the usage log of proxied commands.
+type HistoryConfig struct {
+	Record       bool     `toml:"record" help:"record every routed command in the usage log"`
+	MeasureOnUse string   `toml:"measure_on_use" help:"measure the proxy on every use: parallel = while the command runs, after = once it exits" choices:"parallel|after|off"`
+	TextLog      bool     `toml:"text_log" help:"also append one line per command to <home>/logs/usage.log"`
+	Retention    Duration `toml:"retention" help:"delete usage rows older than this (0 = keep forever)"`
+	ListLimit    int      `toml:"list_limit" help:"default row limit of 'px history' (0 = all)" min:"0"`
+	SkipCommands []string `toml:"skip_commands" help:"commands never logged by the shell hooks"`
+}
 
-// ShellConfig is reserved for shell-integration settings.
-type ShellConfig struct{}
+// ShellConfig configures shell integration (px on / px off, prompt segment).
+type ShellConfig struct {
+	Verify       bool     `toml:"verify" help:"verify the proxy before 'px on' exports it"`
+	NoProxy      string   `toml:"no_proxy" help:"NO_PROXY exported by 'px on'"`
+	LogCommands  bool     `toml:"log_commands" help:"log every command typed while the proxy is on (preexec / precmd hooks)"`
+	Icon         string   `toml:"icon" help:"prompt icon shown while the proxy is on (Nerd Font glyph or emoji)"`
+	Color        string   `toml:"color" help:"prompt color (zsh / p10k color number or name)"`
+	PromptFormat string   `toml:"prompt_format" help:"segment text: {icon} {scheme} {host} {port} {ms} {cc} {id} {tags}"`
+	PromptAuto   bool     `toml:"prompt_auto" help:"plain zsh / bash / fish: prefix the prompt while the proxy is on"`
+	P10K         string   `toml:"p10k" help:"add the 'silkrouter' segment to powerlevel10k automatically" choices:"left|right|none"`
+	Method       string   `toml:"method" help:"how 'px shell' proxies its process tree" choices:"env|proxychains"`
+	Shells       []string `toml:"shells" help:"shells 'px shell install' writes to when none is given"`
+}
 
-// TUIConfig is reserved for TUI settings.
-type TUIConfig struct{}
+// TUIConfig configures the interactive terminal UI.
+type TUIConfig struct {
+	Theme        string   `toml:"theme" help:"color theme" choices:"silk|mono|neon"`
+	Refresh      Duration `toml:"refresh" help:"auto-refresh interval of live views (0 = manual)"`
+	PageSize     int      `toml:"page_size" help:"rows loaded per page in tables" min:"10"`
+	StartTab     string   `toml:"start_tab" help:"tab shown on start" choices:"dashboard|proxies|history|tags|scans|config"`
+	Mouse        bool     `toml:"mouse" help:"enable mouse support"`
+	AltScreen    bool     `toml:"alt_screen" help:"use the alternate screen"`
+	Columns      []string `toml:"columns" help:"proxy table columns, in order"`
+	ConfirmQuit  bool     `toml:"confirm_quit" help:"ask before quitting while a check is running"`
+	Markdown     bool     `toml:"markdown" help:"render help and details as markdown (glamour)"`
+	DefaultSort  string   `toml:"default_sort" help:"initial sort of the proxy table (px proxies --sort keys)"`
+	ShowDeadRows bool     `toml:"show_dead" help:"show dead proxies in the proxy table by default"`
+}
 
 // Default returns the built-in defaults.
 func Default() *Config {
@@ -155,6 +230,9 @@ func Default() *Config {
 			Verify:        "auto",
 			VerifyTimeout: Seconds(8),
 			Pool:          "db",
+			Prefer:        "smart",
+			ExcludeTags:   []string{"blocked"},
+			Method:        "env",
 		},
 		Build:      BuildConfig{Workers: 200, Tries: 2, Timeout: Seconds(15)},
 		Check:      CheckConfig{Workers: 100, Tries: 1, Timeout: Seconds(8)},
@@ -170,6 +248,80 @@ func Default() *Config {
 			Backup:        true,
 			ListLimit:     50,
 			ShowRecent:    15,
+		},
+		Scan: ScanConfig{
+			Workers:      32,
+			QuickWorkers: 200,
+			Tries:        3,
+			Timeout:      Seconds(10),
+			Delay:        Duration(150 * time.Millisecond),
+			Probes:       []string{"cloudflare", "google", "gstatic", "msft", "apple", "example"},
+			FailFast:     2,
+			ExitProbe:    "ipify",
+			HTTPSURL:     "https://www.cloudflare.com/cdn-cgi/trace",
+			JudgeURL:     "http://httpbin.org/get?show_env=1",
+			RealIPURL:    "https://api.ipify.org/",
+			Protocols:    true,
+			DNSBL:        true,
+			DNSBLZones: []string{
+				"zen.spamhaus.org", "bl.spamcop.net", "b.barracudacentral.org", "dnsbl.dronebl.org",
+				"rbl.efnetrbl.org", "psbl.surriel.com", "all.s5h.net", "dnsbl-1.uceprotect.net",
+				"ix.dnsbl.manitu.net", "bl.blocklist.de", "torexit.dan.me.uk", "dnsbl.spfbl.net",
+				"bl.mailspike.net", "spam.dnsbl.anonmails.de", "rbl.interserver.net",
+			},
+			DNSTimeout:   Seconds(4),
+			Lists:        true,
+			ListsTTL:     Duration(12 * time.Hour),
+			Geo:          "ip-api",
+			GeoURL:       "http://ip-api.com/batch",
+			Resume:       true,
+			Rank:         "balanced",
+			WeightSpeed:  0.4,
+			WeightClean:  0.35,
+			WeightStable: 0.25,
+			SpeedRefMS:   250,
+		},
+		Tags: TagsConfig{
+			Auto:          true,
+			StableN:       10,
+			FastN:         10,
+			FastMS:        100,
+			FavMinUses:    10,
+			FavMinRate:    0.8,
+			RecommendTop:  5,
+			FlakyMinFacts: 10,
+			FlakyMaxRate:  0.5,
+		},
+		History: HistoryConfig{
+			Record:       true,
+			MeasureOnUse: "parallel",
+			TextLog:      true,
+			ListLimit:    50,
+			SkipCommands: []string{"px", "s-proxy", "silkrouter", "cd", "ls", "clear", "exit"},
+		},
+		Shell: ShellConfig{
+			Verify:       true,
+			NoProxy:      "localhost,127.0.0.1,::1",
+			LogCommands:  true,
+			Icon:         "\U000f048d", // nf-md-web (󰒍)
+			Color:        "208",
+			PromptFormat: "{icon} {scheme} {host}:{port} {ms}{cc}",
+			PromptAuto:   true,
+			P10K:         "left",
+			Method:       "env",
+			Shells:       []string{"zsh"},
+		},
+		TUI: TUIConfig{
+			Theme:       "silk",
+			Refresh:     Seconds(5),
+			PageSize:    500,
+			StartTab:    "dashboard",
+			Mouse:       true,
+			AltScreen:   true,
+			Columns:     []string{"id", "proxy", "status", "last", "avg", "ok", "fail", "streak", "cc", "anon", "bl", "rank", "tags"},
+			ConfirmQuit: true,
+			Markdown:    true,
+			DefaultSort: "rank",
 		},
 	}
 	c.meta.sources = map[string]string{}

@@ -28,6 +28,17 @@ type Filter struct {
 	// country, org or source (case-insensitive).
 	Search       string
 	CheckedSince time.Time // checked at or after
+	// ExcludeTags drops proxies carrying any of these tags (any scope).
+	ExcludeTags []string
+	// Anonymity keeps only these anonymity grades.
+	Anonymity []string
+	// HTTPSOnly keeps proxies whose TLS check succeeded.
+	HTTPSOnly bool
+	// AfterID keeps ids greater than this (resumable scans walk by id).
+	AfterID int64
+	// FullScanBefore keeps proxies never full-scanned or full-scanned before
+	// this time.
+	FullScanBefore time.Time
 	// Sort is one of SortKeys (default "id"); each key has a natural
 	// direction (latency ascending, scores descending, ...). Reverse flips
 	// it. Unknown values (NULL) always sort last. "random" shuffles.
@@ -66,6 +77,13 @@ var sortKeys = map[string]sortSpec{
 	"scheme":       {"p.scheme", false, "protocol"},
 	"country":      {"p.country", false, "exit country"},
 	"random":       {"random()", false, "random order"},
+	"stable_score": {"p.stable_score", true, "stability score (higher = steadier)"},
+	"jitter_ms":    {"p.jitter_ms", false, "latency jitter of the last full scan"},
+	"use_count":    {"p.use_count", true, "times used"},
+	"use_rate":     {"(CAST(p.use_ok AS REAL) / nullif(p.use_count, 0))", true, "share of uses that exited 0"},
+	"last_used_at": {"p.last_used_at", true, "most recently used first"},
+	"full_scan_at": {"p.full_scan_at", true, "most recently full-scanned first"},
+	"anonymity":    {"CASE p.anonymity WHEN 'elite' THEN 0 WHEN 'anonymous' THEN 1 WHEN 'transparent' THEN 2 END", false, "elite, anonymous, transparent, then unknown"},
 }
 
 // SortKeys lists the accepted Filter.Sort values, sorted.
@@ -183,6 +201,25 @@ func (f Filter) where() (string, []any) {
 	if !f.CheckedSince.IsZero() {
 		conds = append(conds, "p.checked_at >= ?")
 		args = append(args, f.CheckedSince.UnixMilli())
+	}
+	if len(f.ExcludeTags) > 0 {
+		conds = append(conds, "NOT EXISTS (SELECT 1 FROM tags t WHERE t.proxy_id = p.id AND t.tag IN ("+
+			placeholders(len(f.ExcludeTags))+"))")
+		for _, t := range f.ExcludeTags {
+			args = append(args, t)
+		}
+	}
+	in("p.anonymity", f.Anonymity)
+	if f.HTTPSOnly {
+		conds = append(conds, "p.https_ok = 1")
+	}
+	if f.AfterID > 0 {
+		conds = append(conds, "p.id > ?")
+		args = append(args, f.AfterID)
+	}
+	if !f.FullScanBefore.IsZero() {
+		conds = append(conds, "(p.full_scan_at IS NULL OR p.full_scan_at < ?)")
+		args = append(args, f.FullScanBefore.UnixMilli())
 	}
 	if s := strings.TrimSpace(f.Search); s != "" {
 		like := "%" + strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`).Replace(strings.ToLower(s)) + "%"

@@ -34,6 +34,7 @@ type WriterOptions struct {
 type WriterStats struct {
 	Measurements int64 `json:"measurements"`
 	Reputation   int64 `json:"reputation"`
+	Infos        int64 `json:"infos"`
 	Batches      int64 `json:"batches"`
 	Failed       int64 `json:"failed_rows"`
 }
@@ -59,13 +60,14 @@ type Writer struct {
 	once  sync.Once
 	err   error // first commit error, read after done
 	stats struct {
-		measurements, reputation, batches, failed atomic.Int64
+		measurements, reputation, infos, batches, failed atomic.Int64
 	}
 }
 
 type writeOp struct {
 	m     *Measurement
 	r     *Reputation
+	i     *ProxyInfo
 	flush chan error
 }
 
@@ -104,6 +106,12 @@ func (w *Writer) Reputation(r Reputation) error {
 		r.CheckedAt = nowFunc()
 	}
 	return w.send(writeOp{r: &r})
+}
+
+// Info queues scan-learned proxy information (geo, anonymity, protocols,
+// ...). It is applied after the measurements and verdicts of its batch.
+func (w *Writer) Info(i ProxyInfo) error {
+	return w.send(writeOp{i: &i})
 }
 
 func (w *Writer) send(op writeOp) error {
@@ -161,6 +169,7 @@ func (w *Writer) Stats() WriterStats {
 	return WriterStats{
 		Measurements: w.stats.measurements.Load(),
 		Reputation:   w.stats.reputation.Load(),
+		Infos:        w.stats.infos.Load(),
 		Batches:      w.stats.batches.Load(),
 		Failed:       w.stats.failed.Load(),
 	}
@@ -173,12 +182,13 @@ func (w *Writer) loop() {
 
 	var ms []Measurement
 	var rs []Reputation
+	var is []ProxyInfo
 	commit := func(ctx context.Context) error {
-		if len(ms) == 0 && len(rs) == 0 {
+		if len(ms) == 0 && len(rs) == 0 && len(is) == 0 {
 			return nil
 		}
-		err := w.commit(ctx, ms, rs)
-		ms, rs = ms[:0], rs[:0]
+		err := w.commit(ctx, ms, rs, is)
+		ms, rs, is = ms[:0], rs[:0], is[:0]
 		return err
 	}
 	// The final commit must survive the cancellation that triggered it.
@@ -192,11 +202,13 @@ func (w *Writer) loop() {
 				ms = append(ms, *op.m)
 			case op.r != nil:
 				rs = append(rs, *op.r)
+			case op.i != nil:
+				is = append(is, *op.i)
 			case op.flush != nil:
 				op.flush <- commit(final)
 				continue
 			}
-			if len(ms)+len(rs) >= w.opts.BatchSize {
+			if len(ms)+len(rs)+len(is) >= w.opts.BatchSize {
 				commit(w.ctx)
 			}
 		case <-ticker.C:
@@ -214,12 +226,13 @@ func (w *Writer) loop() {
 // commit writes one batch in a single transaction. A batch that fails
 // because the context was cancelled mid-way is retried once with a
 // non-cancelled context.
-func (w *Writer) commit(ctx context.Context, ms []Measurement, rs []Reputation) error {
+func (w *Writer) commit(ctx context.Context, ms []Measurement, rs []Reputation, is []ProxyInfo) error {
 	run := func(ctx context.Context) error {
 		// Work on copies: recordTx fills IDs/defaults in place, and a retry
 		// must start from the original rows.
 		mc := append([]Measurement(nil), ms...)
 		rc := append([]Reputation(nil), rs...)
+		ic := append([]ProxyInfo(nil), is...)
 		return w.db.Tx(ctx, func(tx *sql.Tx) error {
 			if len(mc) > 0 {
 				if err := recordTx(ctx, tx, mc); err != nil {
@@ -227,7 +240,12 @@ func (w *Writer) commit(ctx context.Context, ms []Measurement, rs []Reputation) 
 				}
 			}
 			if len(rc) > 0 {
-				return reputationTx(ctx, tx, rc)
+				if err := reputationTx(ctx, tx, rc); err != nil {
+					return err
+				}
+			}
+			if len(ic) > 0 {
+				return infoTx(ctx, tx, ic)
 			}
 			return nil
 		})
@@ -236,7 +254,7 @@ func (w *Writer) commit(ctx context.Context, ms []Measurement, rs []Reputation) 
 	if err != nil && ctx.Err() != nil {
 		err = run(context.WithoutCancel(ctx))
 	}
-	n := len(ms) + len(rs)
+	n := len(ms) + len(rs) + len(is)
 	if err != nil {
 		w.stats.failed.Add(int64(n))
 		if w.err == nil {
@@ -249,6 +267,7 @@ func (w *Writer) commit(ctx context.Context, ms []Measurement, rs []Reputation) 
 	}
 	w.stats.measurements.Add(int64(len(ms)))
 	w.stats.reputation.Add(int64(len(rs)))
+	w.stats.infos.Add(int64(len(is)))
 	w.stats.batches.Add(1)
 	return nil
 }

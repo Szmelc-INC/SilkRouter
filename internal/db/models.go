@@ -102,8 +102,90 @@ type Proxy struct {
 	SpeedScore  *float64  `json:"speed_score,omitempty"`
 	CleanScore  *float64  `json:"clean_score,omitempty"`
 	Rank        *int      `json:"rank,omitempty"`
-	Tags        []string  `json:"tags,omitempty"` // filled when Filter.WithTags
+
+	// Learned by full scans (schema v2).
+	Protocols   []string  `json:"protocols,omitempty"` // schemes verified on host:port
+	HTTPSOK     *bool     `json:"https_ok,omitempty"`  // TLS through the proxy worked
+	JitterMS    *float64  `json:"jitter_ms,omitempty"`
+	Region      string    `json:"region,omitempty"`
+	City        string    `json:"city,omitempty"`
+	ISP         string    `json:"isp,omitempty"`
+	Hosting     *bool     `json:"hosting,omitempty"` // datacenter / hosting range
+	Mobile      *bool     `json:"mobile,omitempty"`
+	FullScanAt  time.Time `json:"full_scan_at,omitzero"`
+	StableScore *float64  `json:"stable_score,omitempty"`
+
+	// Usage counters (from usage_log).
+	UseCount    int       `json:"use_count"`
+	UseOK       int       `json:"use_ok"`
+	UseFail     int       `json:"use_fail"`
+	UseProxyErr int       `json:"use_proxy_err"`
+	LastUsedAt  time.Time `json:"last_used_at,omitzero"`
+	LastCmd     string    `json:"last_cmd,omitempty"`
+
+	Tags []string `json:"tags,omitempty"` // filled when Filter.WithTags
 }
+
+// SuccessRate is ok / (ok + fail) over every fact, or -1 when unmeasured.
+func (p *Proxy) SuccessRate() float64 {
+	n := p.OKCount + p.FailCount
+	if n == 0 {
+		return -1
+	}
+	return float64(p.OKCount) / float64(n)
+}
+
+// HasTag reports whether p carries label ("tag" or "tag:scope"); Tags must
+// have been loaded (Filter.WithTags).
+func (p *Proxy) HasTag(label string) bool {
+	for _, t := range p.Tags {
+		if t == label {
+			return true
+		}
+	}
+	return false
+}
+
+// ProxyErrClasses are the err_class values that point at the proxy or the
+// network rather than at the routed program itself.
+var ProxyErrClasses = []string{ErrTimeout, ErrRefused, ErrReset, ErrDNS, ErrTLS, ErrAuth, ErrProto}
+
+// IsProxyErr reports whether class is one of ProxyErrClasses.
+func IsProxyErr(class string) bool {
+	for _, c := range ProxyErrClasses {
+		if c == class {
+			return true
+		}
+	}
+	return false
+}
+
+// ProxyInfo is what a scan learned about a proxy beyond measurements. Empty
+// strings, nil pointers, a nil Protocols slice and a zero FullScanAt leave
+// the stored value unchanged.
+type ProxyInfo struct {
+	ProxyID    int64
+	Addr       Addr // used when ProxyID is 0
+	Country    string
+	Region     string
+	City       string
+	ASN        string
+	Org        string
+	ISP        string
+	Anonymity  string
+	Hosting    *bool
+	Mobile     *bool
+	HTTPSOK    *bool
+	JitterMS   *float64
+	Protocols  []string
+	FullScanAt time.Time
+}
+
+// Bool returns a pointer to b (for ProxyInfo fields).
+func Bool(b bool) *bool { return &b }
+
+// Float returns a pointer to f.
+func Float(f float64) *float64 { return &f }
 
 // URL is scheme://[user:pass@]host:port.
 func (p *Proxy) URL() string { return p.ToProxy().URL() }
@@ -192,7 +274,11 @@ type Usage struct {
 	ExitCode    *int      `json:"exit_code,omitempty"`
 	DurationMS  int64     `json:"duration_ms,omitempty"`
 	ErrClass    string    `json:"err_class,omitempty"`
+	MS          int       `json:"ms,omitempty"` // proxy latency measured during the command
 }
+
+// OK reports whether the command finished with exit code 0.
+func (u *Usage) OK() bool { return u.ExitCode != nil && *u.ExitCode == 0 }
 
 // Tag is one heuristic or manual tag on a proxy.
 type Tag struct {
