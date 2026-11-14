@@ -8,6 +8,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -19,6 +20,7 @@ import (
 
 	"github.com/szmelc-inc/silkrouter/internal/config"
 	"github.com/szmelc-inc/silkrouter/internal/db"
+	"github.com/szmelc-inc/silkrouter/internal/reputation"
 	"github.com/szmelc-inc/silkrouter/internal/score"
 )
 
@@ -668,7 +670,7 @@ func TestScansAndRank(t *testing.T) {
 func TestListsView(t *testing.T) {
 	h := newHarness(t)
 	h.key("6")
-	h.mustSee("LIST", "ENTRIES", "tor-exits", "never", "16 lists")
+	h.mustSee("LIST", "ENTRIES", "tor-exits", "never", strconv.Itoa(len(reputation.Builtin))+" lists")
 }
 
 func TestHelpOverlay(t *testing.T) {

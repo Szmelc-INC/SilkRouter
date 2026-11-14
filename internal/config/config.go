@@ -209,7 +209,7 @@ type TUIConfig struct {
 	Theme        string   `toml:"theme" help:"color theme" choices:"silk|mono|neon"`
 	Refresh      Duration `toml:"refresh" help:"auto-refresh interval of live views (0 = manual)"`
 	PageSize     int      `toml:"page_size" help:"rows loaded per page in tables" min:"10"`
-	StartTab     string   `toml:"start_tab" help:"tab shown on start" choices:"dashboard|proxies|history|tags|scans|config"`
+	StartTab     string   `toml:"start_tab" help:"tab shown on start" choices:"dashboard|proxies|history|tags|scans|lists|config"`
 	Mouse        bool     `toml:"mouse" help:"enable mouse support"`
 	AltScreen    bool     `toml:"alt_screen" help:"use the alternate screen"`
 	Columns      []string `toml:"columns" help:"proxy table columns, in order"`

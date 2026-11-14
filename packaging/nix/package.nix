@@ -19,7 +19,7 @@ in
 
   # Hash of the vendored modules. After changing go.mod / go.sum run
   # `make nix-hash` (or `nix build` and copy the "got:" hash) and paste it.
-  vendorHash = "sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
+  vendorHash = "sha256-+U5X9tvdWiIJrYkWbVzfE0aiiEGLaJEJ0I8HO9yL6JI=";
 
   env.CGO_ENABLED = 0;
   ldflags = [

@@ -143,7 +143,6 @@ While it is on, the shell hooks log every command you type (mode shell, see
 	})
 	cli.Register(cli.Command{
 		Name:      "rotate",
-		Aliases:   []string{"next"},
 		Group:     cli.GroupShell,
 		Summary:   "switch this shell's session to another proxy (same filters)",
 		Usage:     "[selection options]",

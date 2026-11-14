@@ -53,7 +53,7 @@ func newApp() *cli.App {
 		Binary:   "silkrouter",
 		Aliases:  []string{"px", "s-proxy"},
 		Version:  version,
-		Tagline:  "route any command through a fast proxy",
+		Tagline:  "route any command (or a whole shell) through fast, scanned, ranked proxies",
 		Usage: []cli.Example{
 			{Cmd: "[global options] <command> [options] [args]"},
 			{Cmd: "[route options] <program> [args...]", Desc: "legacy px.sh style: same as route"},
