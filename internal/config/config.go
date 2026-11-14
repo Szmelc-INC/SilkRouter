@@ -259,7 +259,7 @@ func Default() *Config {
 			FailFast:     2,
 			ExitProbe:    "ipify",
 			HTTPSURL:     "https://www.cloudflare.com/cdn-cgi/trace",
-			JudgeURL:     "http://httpbin.org/get?show_env=1",
+			JudgeURL:     "http://httpbin.org/get", // no show_env: that adds the host's own load-balancer headers
 			RealIPURL:    "https://api.ipify.org/",
 			Protocols:    true,
 			DNSBL:        true,
