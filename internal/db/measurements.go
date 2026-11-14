@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"fmt"
 	"slices"
+	"strings"
 	"time"
 )
 
@@ -39,6 +40,12 @@ func (s *summary) fold(m *Measurement) {
 	if ts > s.checkedAt {
 		s.checkedAt = ts
 	}
+	if m.ExitIP != "" {
+		s.exitIP = m.ExitIP
+	}
+	if IsAuxProbe(m.Probe) {
+		return // kept as a fact, but liveness / latency come from connectivity checks
+	}
 	if m.OK {
 		s.status = StatusAlive
 		s.okCount++
@@ -58,10 +65,30 @@ func (s *summary) fold(m *Measurement) {
 		s.failStreak++
 		s.okStreak = 0
 	}
-	if m.ExitIP != "" {
-		s.exitIP = m.ExitIP
-	}
 }
+
+// Auxiliary probe names: scan checks that test something beyond "does the
+// proxy carry traffic" (TLS to one site, an anonymity judge, the exit-IP
+// lookup). Their facts are stored like any other, but fold ignores them
+// for status, counts, streaks and latency (exit_ip and checked_at still
+// update): a proxy that answered every connectivity probe must not turn
+// "dead" because a judge site refused it at the end of a full scan.
+var AuxProbes = []string{"https", "judge", "exit-ip"}
+
+// IsAuxProbe reports whether name is one of AuxProbes.
+func IsAuxProbe(name string) bool { return slices.Contains(AuxProbes, name) }
+
+// auxProbeSQL is a SQL list literal of AuxProbes ("'https','judge',...").
+func auxProbeSQL() string {
+	q := make([]string, len(AuxProbes))
+	for i, p := range AuxProbes {
+		q[i] = "'" + p + "'"
+	}
+	return strings.Join(q, ",")
+}
+
+// NotAuxCond is a WHERE fragment excluding auxiliary facts (column probe).
+func NotAuxCond() string { return "probe NOT IN (" + auxProbeSQL() + ")" }
 
 func (s *summary) avg() any {
 	if s.msCount == 0 {
@@ -247,7 +274,7 @@ func (d *DB) RebuildStats(ctx context.Context) (RebuildResult, error) {
 			return err
 		}
 		defer save.Close()
-		rows, err := tx.QueryContext(ctx, `SELECT proxy_id, ts, ok, coalesce(ms, 0), coalesce(exit_ip, '')
+		rows, err := tx.QueryContext(ctx, `SELECT proxy_id, ts, ok, coalesce(ms, 0), coalesce(exit_ip, ''), probe
 			FROM measurements ORDER BY proxy_id, id`)
 		if err != nil {
 			return err
@@ -271,7 +298,7 @@ func (d *DB) RebuildStats(ctx context.Context) (RebuildResult, error) {
 		for rows.Next() {
 			var f fact
 			var ts int64
-			if err := rows.Scan(&f.id, &ts, &f.m.OK, &f.m.MS, &f.m.ExitIP); err != nil {
+			if err := rows.Scan(&f.id, &ts, &f.m.OK, &f.m.MS, &f.m.ExitIP, &f.m.Probe); err != nil {
 				rows.Close()
 				return err
 			}

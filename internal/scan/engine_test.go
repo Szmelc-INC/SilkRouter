@@ -200,7 +200,7 @@ func TestFullScan(t *testing.T) {
 		}
 		kinds[fmt.Sprintf("%d/%s/%v", m.ProxyID, m.Probe, m.OK)]++
 	}
-	for _, want := range []string{"1/cloudflare/true", "1/google/true", "1/ipify/true", "1/judge/true", "2/tcp/false"} {
+	for _, want := range []string{"1/cloudflare/true", "1/google/true", "1/exit-ip/true", "1/judge/true", "2/tcp/false"} {
 		if kinds[want] != 1 {
 			t.Errorf("missing fact %s: %v", want, kinds)
 		}

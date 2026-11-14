@@ -152,7 +152,7 @@ func computeTags(ctx context.Context, q *sql.DB, o TagOptions, ids []int64, _ st
 		return db.Tag{ProxyID: id, Tag: TagStable, Reason: fmt.Sprintf("last %d checks / uses ok", o.StableN)}
 	}, `SELECT proxy_id FROM (
 			SELECT proxy_id, ok, row_number() OVER (PARTITION BY proxy_id ORDER BY id DESC) AS rn
-			FROM measurements WHERE 1=1`+idCond+`)
+			FROM measurements WHERE `+db.NotAuxCond()+idCond+`)
 		WHERE rn <= ? GROUP BY proxy_id HAVING count(*) = ? AND sum(ok) = ?`,
 		append(append([]any{}, idArgs...), o.StableN, o.StableN, o.StableN)...)
 	if err != nil {
@@ -164,7 +164,7 @@ func computeTags(ctx context.Context, q *sql.DB, o TagOptions, ids []int64, _ st
 		return db.Tag{ProxyID: id, Tag: TagFast, Reason: fmt.Sprintf("last %d timed successes < %dms (max %vms)", o.FastN, o.FastMS, extra[0])}
 	}, `SELECT proxy_id, max(ms) FROM (
 			SELECT proxy_id, ms, row_number() OVER (PARTITION BY proxy_id ORDER BY id DESC) AS rn
-			FROM measurements WHERE ok = 1 AND ms > 0`+idCond+`)
+			FROM measurements WHERE ok = 1 AND ms > 0 AND `+db.NotAuxCond()+idCond+`)
 		WHERE rn <= ? GROUP BY proxy_id HAVING count(*) = ? AND max(ms) < ?`,
 		append(append([]any{}, idArgs...), o.FastN, o.FastN, o.FastMS)...)
 	if err != nil {

@@ -250,7 +250,7 @@ func load(ctx context.Context, q *sql.DB, recent int) (map[int64]*facts, error) 
 	// Recent facts: the last N per proxy (ok count, timed successes).
 	rows, err = q.QueryContext(ctx, `SELECT proxy_id, ok, ms FROM (
 		SELECT proxy_id, ok, ms, row_number() OVER (PARTITION BY proxy_id ORDER BY id DESC) AS rn
-		FROM measurements) WHERE rn <= ?`, recent)
+		FROM measurements WHERE `+db.NotAuxCond()+`) WHERE rn <= ?`, recent)
 	if err != nil {
 		return nil, fmt.Errorf("score: recent facts: %w", err)
 	}

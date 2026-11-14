@@ -40,6 +40,9 @@ const (
 	ProbeHTTPS = "https" // TLS request through the proxy
 	ProbeJudge = "judge" // anonymity judge
 	ProbeProto = "proto" // protocol detection handshake
+	ProbeExit  = "exit-ip"
+	// ProbeHTTPS, ProbeJudge and ProbeExit are auxiliary (db.AuxProbes):
+	// stored as facts, but they do not change a proxy's status or latency.
 )
 
 // Target is one proxy to scan.
@@ -302,8 +305,9 @@ func (e *Engine) full(ctx context.Context, t Target, r *Report) {
 	}
 	if e.opts.ExitProbe != nil && e.pause(ctx) {
 		res := e.opts.ExitProbe.Measure(ctx, p, 1, e.opts.Timeout)
-		e.measure(db.Measurement{ProxyID: t.ID, Probe: e.opts.ExitProbe.Name, OK: res.OK, MS: res.LatencyMS,
-			ErrClass: probe.ClassifyErr(res.Err), ExitIP: res.ExitIP})
+		e.measure(db.Measurement{ProxyID: t.ID, Probe: ProbeExit, OK: res.OK, MS: res.LatencyMS,
+			ErrClass: probe.ClassifyErr(res.Err), ExitIP: res.ExitIP,
+			Detail: jsonDetail(map[string]any{"probe": e.opts.ExitProbe.Name})})
 		if res.ExitIP != "" {
 			r.ExitIP = res.ExitIP
 		}
@@ -524,18 +528,34 @@ func (e *Engine) judge(ctx context.Context, t Target, r *Report) {
 // protoSchemes are the handshakes protocol detection tries.
 var protoSchemes = []proxy.Scheme{proxy.HTTP, proxy.SOCKS5, proxy.SOCKS4}
 
+// sameFamily reports whether s is the handshake family of the target's own
+// scheme (https proxies speak the http CONNECT handshake, socks4a socks4).
+func sameFamily(s, own proxy.Scheme) bool {
+	return s == own || (s == proxy.HTTP && own == proxy.HTTPS) || (s == proxy.SOCKS4 && own == proxy.SOCKS4A)
+}
+
 // protocols tries every handshake on host:port and fetches a 204 through
-// the tunnel. A scheme other than the target's that works is recorded as a
-// measurement of that address (which adds it to the database).
+// the tunnel. The target's own scheme counts as verified without another
+// test when its probes already succeeded (many free proxies throttle a
+// burst of connections, so re-testing it last gives false negatives). A
+// scheme other than the target's that works is recorded as a measurement
+// of that address (which adds it to the database).
 func (e *Engine) protocols(ctx context.Context, t Target, r *Report) {
 	var works []string
-	for i, s := range protoSchemes {
+	tested := 0
+	for _, s := range protoSchemes {
 		if ctx.Err() != nil {
 			return
 		}
-		if i > 0 && !e.pause(ctx) {
+		own := sameFamily(s, t.Proxy.Scheme)
+		if own && r.ProbesOK > 0 {
+			works = append(works, string(s))
+			continue
+		}
+		if tested > 0 && !e.pause(ctx) {
 			return
 		}
+		tested++
 		pp := t.Proxy
 		pp.Scheme = s
 		ms, err := tunnelCheck(ctx, pp, e.opts.ProtoTarget, e.opts.Timeout)
@@ -543,8 +563,7 @@ func (e *Engine) protocols(ctx context.Context, t Target, r *Report) {
 			continue
 		}
 		works = append(works, string(s))
-		if s == t.Proxy.Scheme || (s == proxy.HTTP && t.Proxy.Scheme == proxy.HTTPS) ||
-			(s == proxy.SOCKS4 && t.Proxy.Scheme == proxy.SOCKS4A) {
+		if own {
 			continue
 		}
 		e.measure(db.Measurement{Addr: db.AddrOf(pp), Probe: ProbeProto, OK: true, MS: ms,

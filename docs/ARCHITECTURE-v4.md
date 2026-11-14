@@ -251,6 +251,14 @@ them from `usage_log` (finished rows only). "Proxy error" exits are the
 err_classes timeout, refused, reset, dns, tls, auth, proto
 (`db.IsProxyErr`).
 
+Auxiliary facts (`db.AuxProbes`: probe `https`, `judge`, `exit-ip`) test
+something beyond "the proxy carries traffic" and are recorded like every
+fact, but `fold` only takes `checked_at` and `exit_ip` from them: they never
+change status, counts, streaks or latency (and the stable / fast tags and
+the speed / stability scores skip them, `db.NotAuxCond()`). Found in a real
+trial: throttling proxies answered every connectivity probe of a full scan
+and then refused the judge, which used to flip them to dead.
+
 Summary semantics (`summary.fold`): status follows the latest *inserted*
 fact (id order; ok -> alive, failure -> dead), so a producer that writes an
 older-timestamped fact after a newer one flips status to the older verdict;
@@ -345,7 +353,9 @@ create the file.
   ExitIP}` with a worker pool and writes every fact into a `scan.Sink`
   (`*db.Writer` implements it): `quick` (first probe), `full`, `reputation`,
   `geo`, `protocols`. Measurements use kind `scan`; extra probe names:
-  `tcp`, `https`, `judge`, `proto`. Reports go to `Options.OnDone` from one
+  `tcp`, `https`, `judge`, `exit-ip` (the exit-IP lookup; detail names the
+  probe used), `proto`. Protocol detection counts the target's own scheme
+  as verified when its probes succeeded, and only tunnels the others. Reports go to `Options.OnDone` from one
   goroutine in completion order; a target interrupted by Ctrl-C produces no
   report (the resumed run redoes it).
 - `full` per target: TCP connect (failure = one `tcp` fact, then only the
