@@ -223,3 +223,13 @@ func TestBootstrap(t *testing.T) {
 		t.Fatal("rc file / supported")
 	}
 }
+
+func TestRenderPromptStripsShellSyntax(t *testing.T) {
+	// Country codes and tags come from untrusted sources and end up in PS1.
+	f := PromptFields{Icon: "*", Scheme: "socks5", Host: "1.2.3.4", Port: 1080,
+		Country: "$(touch /tmp/pwned)`id`", Tags: []string{"fast", "$x"}}
+	got := RenderPrompt("{icon} {scheme} {host}:{port} {cc} {tags}", f)
+	if want := "* socks5 1.2.3.4:1080 touchtmppwnedid fast,x"; got != want {
+		t.Fatalf("RenderPrompt = %q, want %q", got, want)
+	}
+}

@@ -1,5 +1,9 @@
 # SilkRouter
 
+![Go](https://img.shields.io/badge/Go-1.26-105c5c?logo=go&logoColor=white)
+![License: MIT](https://img.shields.io/badge/license-MIT-105c5c)
+![Platforms](https://img.shields.io/badge/platforms-linux%20%7C%20macos%20%7C%20windows%20%7C%20freebsd-c0c0c0)
+
 A single, cross-platform **Go binary** with no runtime dependencies that
 keeps a SQLite database of every known proxy, scans and ranks them, routes
 any command (or a whole shell) through the best one, and logs every use.
@@ -99,8 +103,8 @@ Optional: `proxychains-ng` for `--chain`, `zsh-theme-powerlevel10k`.
 ### Nix
 
 ```sh
-nix run github:Szmelc-INC/SilkRouter/feat/v4 -- --version
-nix profile install github:Szmelc-INC/SilkRouter/feat/v4
+nix run github:Szmelc-INC/SilkRouter -- --version
+nix profile install github:Szmelc-INC/SilkRouter
 nix develop            # go, gopls, golangci-lint, make, sqlite, proxychains
 ```
 

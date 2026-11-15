@@ -1,18 +1,17 @@
 # Maintainer: Szmelc-INC <https://github.com/Szmelc-INC>
 #
-# VCS package built from the repository. Until v4 is merged into main the
-# branch below is feat/v4; switch _branch to main afterwards.
+# VCS package built from the main branch of the repository.
 # Local build from this checkout: `make pkg-arch` (runs makepkg here).
 
 pkgname=silkrouter-git
 _pkgname=silkrouter
-_branch=feat/v4
+_branch=main
 pkgver=4.0.0.r0.g0000000
 pkgrel=1
 pkgdesc='Route any command through fast, scanned and ranked proxies (px / s-proxy / silkrouter): SQLite proxy database, full scans, usage log, shell integration and TUI'
 arch=('x86_64' 'aarch64' 'armv7h' 'i686')
 url='https://github.com/Szmelc-INC/SilkRouter'
-license=('unknown')
+license=('MIT')
 depends=()
 makedepends=('git' 'go>=2:1.26')
 optdepends=(
@@ -102,6 +101,7 @@ package() {
   done
   install -Dm644 "${gen}/config.toml.example" "${pkgdir}/usr/share/${_pkgname}/config.toml.example"
 
+  install -Dm644 LICENSE "${pkgdir}/usr/share/licenses/${_pkgname}/LICENSE"
   install -Dm644 README.md "${pkgdir}/usr/share/doc/${_pkgname}/README.md"
   install -Dm644 docs/ARCHITECTURE-v4.md "${pkgdir}/usr/share/doc/${_pkgname}/ARCHITECTURE-v4.md"
   if [[ -f docs/TUI.md ]]; then

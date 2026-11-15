@@ -456,7 +456,7 @@ func (e *Engine) https(ctx context.Context, t Target, r *Report) {
 					r.ExitIP = ip
 				}
 			}
-			if loc := kv["loc"]; len(loc) == 2 {
+			if loc := kv["loc"]; ValidCountry(loc) {
 				r.Country = loc
 			}
 			for _, k := range []string{"loc", "colo", "tls", "http", "warp"} {
@@ -878,9 +878,22 @@ func (e *Engine) geoLoop(ctx context.Context) {
 }
 
 func (e *Engine) applyGeo(id int64, g reputation.Geo) {
-	_ = e.sink.Info(db.ProxyInfo{ProxyID: id, Country: g.CountryCode, Region: g.Region, City: g.City,
+	cc := g.CountryCode
+	if !ValidCountry(cc) {
+		cc = "" // ip-api is plain HTTP: never store what a MITM could inject
+	}
+	_ = e.sink.Info(db.ProxyInfo{ProxyID: id, Country: cc, Region: g.Region, City: g.City,
 		ASN: g.ASN(), Org: g.Organization(), ISP: g.ISP, Hosting: db.Bool(g.Hosting), Mobile: db.Bool(g.Mobile)})
 }
+
+// ValidCountry reports whether cc is a two-letter ASCII country code. The
+// trace body comes through the proxy under test and the geo lookup is plain
+// HTTP, so both are untrusted; the code ends up in prompts and tables.
+func ValidCountry(cc string) bool {
+	return len(cc) == 2 && isAlpha(cc[0]) && isAlpha(cc[1])
+}
+
+func isAlpha(c byte) bool { return c >= 'A' && c <= 'Z' || c >= 'a' && c <= 'z' }
 
 // ---- low-level checks -----------------------------------------------------------
 

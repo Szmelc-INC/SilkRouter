@@ -66,6 +66,7 @@ in
   meta = {
     description = "Route any command through fast, scanned and ranked proxies: SQLite proxy database, full scans, usage log, shell integration and TUI";
     homepage = "https://github.com/Szmelc-INC/SilkRouter";
+    license = lib.licenses.mit;
     mainProgram = "silkrouter";
     platforms = lib.platforms.unix;
   };

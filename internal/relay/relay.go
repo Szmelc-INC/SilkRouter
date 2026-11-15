@@ -12,6 +12,7 @@ package relay
 import (
 	"bufio"
 	"context"
+	"crypto/subtle"
 	"encoding/base64"
 	"encoding/binary"
 	"encoding/json"
@@ -380,7 +381,7 @@ func (s *Server) socks5(ctx context.Context, c net.Conn, br *bufio.Reader) {
 		if _, err := io.ReadFull(br, pass); err != nil {
 			return
 		}
-		if string(user)+":"+string(pass) != s.opts.Auth {
+		if !authEqual(string(user)+":"+string(pass), s.opts.Auth) {
 			c.Write([]byte{1, 1})
 			return
 		}
@@ -572,7 +573,12 @@ func basicOK(header, want string) bool {
 		return false
 	}
 	dec, err := base64.StdEncoding.DecodeString(strings.TrimSpace(v))
-	return err == nil && string(dec) == want
+	return err == nil && authEqual(string(dec), want)
+}
+
+// authEqual compares credentials in constant time.
+func authEqual(got, want string) bool {
+	return subtle.ConstantTimeCompare([]byte(got), []byte(want)) == 1
 }
 
 func hostOnly(h string) string {

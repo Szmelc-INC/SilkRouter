@@ -248,10 +248,25 @@ func RenderPrompt(format string, f PromptFields) string {
 	if f.Port > 0 {
 		port = strconv.Itoa(f.Port)
 	}
-	r := strings.NewReplacer("{icon}", f.Icon, "{scheme}", f.Scheme, "{host}", f.Host, "{port}", port,
-		"{ms}", ms, "{cc}", f.Country, "{id}", id, "{tags}", strings.Join(f.Tags, ","))
+	// The format and icon come from the user's config; the other fields can
+	// come from scanned lists or remote lookups, and the result ends up in
+	// PS1 / PROMPT, where $(...) or backticks would run on every prompt.
+	r := strings.NewReplacer("{icon}", f.Icon, "{scheme}", safeField(f.Scheme), "{host}", safeField(f.Host),
+		"{port}", port, "{ms}", ms, "{cc}", safeField(f.Country), "{id}", id,
+		"{tags}", safeField(strings.Join(f.Tags, ",")))
 	out := strings.Join(strings.Fields(r.Replace(format)), " ")
 	return strings.TrimSuffix(strings.TrimPrefix(out, ":"), ":")
+}
+
+// safeField keeps only characters that are inert in every shell prompt:
+// ASCII letters, digits and . _ - : , [ ].
+func safeField(s string) string {
+	return strings.Map(func(r rune) rune {
+		if r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || strings.ContainsRune("._-:,[]", r) {
+			return r
+		}
+		return -1
+	}, s)
 }
 
 // ---- emitted shell code ---------------------------------------------------------
