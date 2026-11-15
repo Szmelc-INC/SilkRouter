@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"math/rand"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -62,6 +63,8 @@ var shOpts struct {
 	plain     bool
 	all       bool
 	olderThan string
+	relay     bool
+	relayAddr string
 }
 
 func selFlags(fs *cli.FlagSet, s *selOpts) {
@@ -124,12 +127,16 @@ While it is on, the shell hooks log every command you type (mode shell, see
 		Flags: func(fs *cli.FlagSet) {
 			selFlags(fs, &shOpts.sel)
 			emitFlags(fs)
+			fs.Bool(&shOpts.relay, "relay", false, "point the shell at the local relay (started in the background when needed) instead of one proxy")
+			fs.String(&shOpts.relayAddr, "relay-addr", fs.Config.Relay.Listen, "relay address").Placeholder("ADDR").
+				ConfigKey("relay.listen")
 		},
 		Examples: []cli.Example{
 			{Cmd: "on", Desc: "a verified proxy (recommended / favourite first)"},
 			{Cmd: "on -s -d 300", Desc: "a socks proxy under 300 ms"},
 			{Cmd: "on --best --tag elite,clean"},
 			{Cmd: "on -p socks5://127.0.0.1:9050", Desc: "a specific proxy (e.g. Tor)"},
+			{Cmd: "on --relay", Desc: "stable 127.0.0.1 relay with failover / rotation underneath"},
 		},
 		Run: runOn,
 	})
@@ -331,7 +338,7 @@ func needWrapper(ctx *cli.Context, what string) int {
 
 // pickProxy chooses a proxy per s: -p, or the database pool (filters,
 // tags, order) verified until one answers (unless NoVerify).
-func pickProxy(ctx *cli.Context, d *db.DB, s *selOpts, avoid string) (proxy.Proxy, *db.Proxy, *probe.Result, error) {
+func pickProxy(ctx *cli.Context, d *db.DB, s *selOpts, avoid ...string) (proxy.Proxy, *db.Proxy, *probe.Result, error) {
 	cfg := ctx.Config
 	pr, err := probe.Get(s.Probe)
 	if err != nil {
@@ -384,14 +391,21 @@ func pickProxy(ctx *cli.Context, d *db.DB, s *selOpts, avoid string) (proxy.Prox
 	if tags := splitList(s.Tag); len(tags) > 0 {
 		rows = withAnyTag(rows, tags)
 	}
-	if avoid != "" {
+	if len(avoid) > 0 {
+		skip := map[string]bool{}
+		for _, a := range avoid {
+			skip[a] = a != ""
+		}
 		kept := rows[:0:0]
 		for _, r := range rows {
-			if r.Key() != avoid {
+			if !skip[r.Key()] {
 				kept = append(kept, r)
 			}
 		}
-		rows = kept
+		// Everything excluded: better a known-bad upstream than none.
+		if len(kept) > 0 {
+			rows = kept
+		}
 	}
 	prefer := s.Prefer
 	if s.Best {
@@ -478,6 +492,9 @@ func runOn(ctx *cli.Context, _ []string) int {
 	if sh == "" {
 		sh = shell.Detect()
 	}
+	if shOpts.relay {
+		return runOnRelay(ctx, sh)
+	}
 	return withDB(ctx, func(d *db.DB) int {
 		st := sessionStore()
 		var s *shell.Session
@@ -511,6 +528,76 @@ func runOn(ctx *cli.Context, _ []string) int {
 		announce(ctx, verb, s)
 		return 0
 	})
+}
+
+// runOnRelay points the shell at the local relay, starting it (with the
+// given selection flags) when nothing answers at the address.
+func runOnRelay(ctx *cli.Context, sh string) int {
+	addr := shOpts.relayAddr
+	st, ok := relayRunning(ctx, addr)
+	if !ok {
+		args := []string{"relay", "--listen", addr}
+		args = append(args, selArgs(ctx, &shOpts.sel)...)
+		if code := spawnRelay(ctx, addr, args); code != 0 {
+			return code
+		}
+		if st, ok = relayRunning(ctx, addr); !ok {
+			ctx.Errorf("relay at %s does not answer", addr)
+			return 1
+		}
+	}
+	socks, httpURL := relayURLs(addr)
+	host, portS, _ := net.SplitHostPort(addr)
+	port, _ := strconv.Atoi(portS)
+	s := &shell.Session{ID: shell.NewID(), Proxy: socks, HTTPProxy: httpURL, Key: "relay://" + addr, Started: time.Now().UTC(),
+		Shell: sh, PID: os.Getppid(), TTY: history.TTY(), Kind: "on", Method: "relay"}
+	if id := os.Getenv(shell.EnvSession); id != "" && os.Getenv(shell.EnvActive) != "" {
+		if old, err := sessionStore().Load(id); err == nil && old.Ended.IsZero() {
+			s.ID, s.Started, s.Rotations = old.ID, old.Started, old.Rotations+1
+		}
+	}
+	if err := sessionStore().Save(s); err != nil {
+		ctx.Errorf("%v", err)
+		return 1
+	}
+	cfg := ctx.Config.Shell
+	vars := shell.OnVars(s, cfg.NoProxy, cfg.Icon, cfg.Color, cfg.PromptFormat, cfg.LogCommands, "relay", host, port, os.LookupEnv)
+	fmt.Fprint(ctx.Stdout, shell.Emit(sh, vars))
+	ctx.Infof("on: relay %s (upstream %s, rotate %s)  session %s", addr, dash(st.Upstream), st.Rotate, s.ID)
+	return 0
+}
+
+// selArgs turns the selection flags given on the command line back into
+// arguments (to start a relay with the same selection).
+func selArgs(ctx *cli.Context, s *selOpts) []string {
+	var out []string
+	add := func(name, flag, value string) {
+		if ctx.Flags.Changed(name) {
+			out = append(out, flag, value)
+		}
+	}
+	if ctx.Flags.Changed("s") && s.Socks {
+		out = append(out, "--socks")
+	}
+	if ctx.Flags.Changed("H") && s.HTTP {
+		out = append(out, "--http")
+	}
+	add("d", "--max-ms", strconv.Itoa(s.MaxMS))
+	add("D", "--min-ms", strconv.Itoa(s.MinMS))
+	add("p", "--proxy", s.Force)
+	add("T", "--tag", s.Tag)
+	add("exclude-tag", "--exclude-tag", s.Exclude)
+	add("for", "--for", s.For)
+	add("prefer", "--prefer", s.Prefer)
+	add("t", "--timeout", s.Timeout.String())
+	add("probe", "--probe", s.Probe)
+	if ctx.Flags.Changed("b") && s.Best {
+		out = append(out, "--best")
+	}
+	if ctx.Flags.Changed("x") && s.NoVerify {
+		out = append(out, "--no-verify")
+	}
+	return out
 }
 
 func runOff(ctx *cli.Context, _ []string) int {

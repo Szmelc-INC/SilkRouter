@@ -48,6 +48,7 @@ type Config struct {
 	Tags       TagsConfig       `toml:"tags" help:"Heuristic tag thresholds (stable, fast, fav:<cmd>, ...)."`
 	History    HistoryConfig    `toml:"history" help:"Usage log of proxied commands."`
 	Shell      ShellConfig      `toml:"shell" help:"Shell integration (px on / px off, prompt segment)."`
+	Relay      RelayConfig      `toml:"relay" help:"Local relay (px relay): one stable loopback proxy over rotating upstreams."`
 	TUI        TUIConfig        `toml:"tui" help:"Interactive terminal UI."`
 
 	meta meta
@@ -205,6 +206,18 @@ type ShellConfig struct {
 	Shells       []string `toml:"shells" help:"shells 'px shell install' writes to when none is given"`
 }
 
+// RelayConfig configures px relay.
+type RelayConfig struct {
+	Listen      string   `toml:"listen" help:"address the relay listens on (keep it on loopback unless auth is set)"`
+	Rotate      string   `toml:"rotate" help:"upstream rotation: sticky = until it fails, per-conn = every connection, interval = every relay.interval" choices:"sticky|per-conn|interval"`
+	Interval    Duration `toml:"interval" help:"rotation period for rotate = interval"`
+	MaxTries    int      `toml:"max_tries" help:"upstreams tried per client connection before giving up (failover)" min:"1"`
+	DialTimeout Duration `toml:"dial_timeout" help:"tunnel setup timeout through one upstream"`
+	Auth        string   `toml:"auth" help:"user:pass required from clients (empty = no authentication)"`
+	Record      bool     `toml:"record" help:"record relay use in the usage log and upstream results as measurements"`
+	SampleEvery Duration `toml:"sample_every" help:"record at most one successful tunnel per upstream this often (failures are always recorded)"`
+}
+
 // TUIConfig configures the interactive terminal UI.
 type TUIConfig struct {
 	Theme        string   `toml:"theme" help:"color theme" choices:"silk|mono|neon"`
@@ -312,6 +325,15 @@ func Default() *Config {
 			P10K:         "left",
 			Method:       "env",
 			Shells:       []string{"zsh"},
+		},
+		Relay: RelayConfig{
+			Listen:      "127.0.0.1:18080",
+			Rotate:      "sticky",
+			Interval:    Duration(10 * time.Minute),
+			MaxTries:    4,
+			DialTimeout: Seconds(10),
+			Record:      true,
+			SampleEvery: Seconds(60),
 		},
 		TUI: TUIConfig{
 			Theme:       "silk",

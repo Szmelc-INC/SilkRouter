@@ -176,6 +176,7 @@ History & tags  history, log     the usage log of every proxied command
                 recommend, rec   recommended proxies, overall or for a command
 Shell           on / off         proxy this shell (and its process tree) / stop
                 rotate           switch this shell's session to another proxy
+                relay            local SOCKS / HTTP proxy over rotating upstreams (failover)
                 session, status  current session; list / show / end / prune
                 shell            proxied subshell; shell install / uninstall
                 shell-init       print the zsh / bash / fish integration script
@@ -249,8 +250,12 @@ px lists check 185.220.101.1        # which lists / DNS blacklists know an IP
 
 `scan full` per proxy: TCP connect time; every probe in `scan.probes` ×
 `scan.tries` (median, jitter; dead proxies stop after `scan.fail_fast` failed
-probes); exit IP; HTTPS through the proxy (CONNECT + TLS, Cloudflare trace for
-the exit country); an anonymity judge (`scan.judge_url`, compared with your
+probes); exit IP; HTTPS through the proxy with its own TLS handshake and
+certificate verification (**TLS interception detection**: a proxy that
+presents its own certificate decrypts your HTTPS; it is tagged `mitm`,
+penalised in the clean score and skipped by route / `px on` / the relay by
+default; non-TLS failures try `scan.https_fallbacks`; the Cloudflare trace
+gives the exit country); an anonymity judge (`scan.judge_url`, compared with your
 real IP); protocol detection (http / socks5 / socks4 on the same port, new
 combinations are added); reputation of host and exit IP on the IP lists and
 DNS blacklists; geolocation / ASN / hosting / mobile (`scan.geo`, batched,
@@ -303,6 +308,7 @@ and `last_cmd` (sortable: `px proxies --sort use_count`).
 | `recommended:<cmd>` | the best for `<cmd>`: usage success, speed, cleanliness |
 | `clean` / `elite` / `https` | full-scanned and on no list / no headers, IP hidden / TLS works |
 | `flaky` / `tor` / `datacenter` / `known` | fails often / Tor exit / hosting range / on a known-proxy list |
+| `mitm` | intercepts TLS (excluded from route, `px on` and the relay by default) |
 
 ### Shell integration: `on`, `off`, `rotate`, `shell`, `session`, `prompt`
 
@@ -341,6 +347,30 @@ While a proxy is on, `preexec` / `precmd` hooks log every typed command (mode
 or subshell under proxychains-ng, which forces every TCP connection of the
 whole process tree through the proxy, also for programs that ignore proxy
 variables.
+
+### Local relay: `relay`
+
+```sh
+px relay                              # foreground on 127.0.0.1:18080 (relay.listen)
+px relay --daemon -s --best           # background; log in <home>/logs/relay.log
+px relay --rotate per-conn            # a new upstream for every connection
+px relay --rotate interval --every 5m --tag elite
+px relay status | rotate | stop
+eval "$(px relay env)"                # ALL_PROXY=socks5h://..., HTTP(S)_PROXY=http://...
+px on --relay                         # the same in your shell (starts the relay when needed)
+```
+
+One loopback port speaks SOCKS5, SOCKS4/4a and HTTP (CONNECT and plain
+requests) and forwards every connection through an upstream from the
+database, picked like `px on` (filters, tags, `--best`, verified unless
+`-x`). When an upstream cannot open a tunnel the next one is tried
+(`relay.max_tries`) and becomes current (failover); `relay.rotate` keeps an
+upstream until it fails (`sticky`), switches for every connection
+(`per-conn`) or every `relay.interval`. Programs keep one stable address
+while upstreams change. Each upstream stint is a usage row (mode `relay`),
+failed tunnels and sampled successful ones are measurements
+(`relay.record`). `--auth user:pass` requires credentials (SOCKS5 RFC 1929,
+HTTP `Proxy-Authorization`); without it the relay should stay on loopback.
 
 ### Interface: `tui`
 
@@ -407,7 +437,7 @@ px config edit | get KEY | reset [KEY] | path
 
 Tables: `[cache]`, `[source]`, `[probe]`, `[route]`, `[build]`, `[check]`,
 `[blcheck]`, `[proxycheck]`, `[ui]`, `[db]`, `[scan]`, `[tags]`, `[history]`,
-`[shell]`, `[tui]`.
+`[shell]`, `[relay]`, `[tui]`.
 
 ---
 
@@ -450,6 +480,7 @@ internal/
   score/            speed / clean / stability scores, ranks, heuristic tags
   history/          exit-code classes, tty, text log, time windows
   shell/            sessions, init scripts, rc blocks, subshell bootstrap
+  relay/            local SOCKS5 / SOCKS4 / HTTP relay with failover and rotation
   tui/              interactive terminal UI (Bubble Tea)
   ui/               cross-platform colour handling
 packaging/          arch/PKGBUILD (+ .SRCINFO), nix/package.nix, nix/hm-module.nix

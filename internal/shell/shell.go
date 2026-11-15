@@ -82,8 +82,9 @@ var sessionVars = []string{EnvActive, EnvProxy, EnvProxyKey, EnvProxyID, EnvProx
 // <home>/run/sessions/<id>.json (0600: the URL may carry credentials).
 type Session struct {
 	ID        string    `json:"id"`
-	Proxy     string    `json:"proxy"` // URL with credentials
-	Key       string    `json:"key"`   // scheme://host:port
+	Proxy     string    `json:"proxy"`                // URL with credentials
+	HTTPProxy string    `json:"http_proxy,omitempty"` // HTTP(S)_PROXY when it differs from Proxy (relay)
+	Key       string    `json:"key"`                  // scheme://host:port
 	ProxyID   int64     `json:"proxy_id,omitempty"`
 	MS        int       `json:"ms,omitempty"`
 	Country   string    `json:"country,omitempty"`
@@ -303,7 +304,11 @@ func OnVars(s *Session, noProxy, icon, color, promptFormat string, logCommands b
 		}
 	}
 	for _, k := range ProxyVars {
-		out = append(out, Var{Name: k, Value: s.Proxy})
+		v := s.Proxy
+		if s.HTTPProxy != "" && !strings.EqualFold(k, "ALL_PROXY") {
+			v = s.HTTPProxy
+		}
+		out = append(out, Var{Name: k, Value: v})
 	}
 	if noProxy != "" {
 		for _, k := range NoProxyVars {

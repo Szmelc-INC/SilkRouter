@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"crypto/tls"
+	"encoding/base64"
 	"fmt"
 	"net"
 	"net/http"
@@ -64,7 +65,8 @@ func (p Proxy) httpConnect(conn net.Conn, target string) error {
 		Header: make(http.Header),
 	}
 	if p.User != "" {
-		req.SetBasicAuth(p.User, p.Pass)
+		// Credentials for the proxy itself (RFC 7235 §4.4), not for the target.
+		req.Header.Set("Proxy-Authorization", "Basic "+base64.StdEncoding.EncodeToString([]byte(p.User+":"+p.Pass)))
 	}
 	if err := req.Write(conn); err != nil {
 		return fmt.Errorf("http connect write: %w", err)

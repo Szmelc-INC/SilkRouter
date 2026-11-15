@@ -380,6 +380,8 @@ create the file.
   ranges (binary search) plus IPv6 prefixes. `reputation.DNSBL` resolves
   `d.c.b.a.<zone>`: 127.0.0.0/8 = listed, NXDOMAIN = not listed,
   127.255.255.x = refused (no verdict).
+- The orchestration lives in `scan_job.go` (`scanJob`, `defaultScanJob`,
+  `runScanJob`), shared by `px scan` and the TUI.
 - `px scan <mode>`: filters like `px proxies` (+ `--unscanned`,
   `--older-than`), a `scan_runs` row whose `opts` identifies the selection
   (same mode + same filters = resumable; `cursor` = the highest id below
@@ -468,6 +470,43 @@ does not by itself mark the proxy as broken.
   (`# >>> silkrouter shell integration >>>`) with a backup to rc files.
   Tests only run it with `--rc` on temp files; nothing ever edits real
   dotfiles during development.
+
+## TLS interception (schema v3)
+
+The full-scan HTTPS check (`scan.TLSFetch`) tunnels to host:443 through
+the proxy, runs the TLS handshake itself (InsecureSkipVerify) and verifies
+the chain for the host against the system roots (`Options.TLSRoots` in
+tests). A certificate that does not verify means the proxy terminates and
+re-signs TLS: `proxies.tls_mitm = 1`, `tls_issuer` = its issuer, the fact
+detail says `"mitm": true`, no fallback URL is tried. Other failures try
+`scan.https_fallbacks`. Consequences: heuristic tag `mitm`, clean score
+-50, never `clean` / `https`, and `route.exclude_tags` defaults to
+`blocked, mitm` (route, `px on`, `px shell`, the relay). Found in the real
+trial: several top-ranked "elite" socks5 proxies intercepted TLS for every
+site.
+
+## Relay (`internal/relay`, `cmd_relay.go`)
+
+- `relay.Server` serves one listener: the first byte picks the protocol
+  (5 = SOCKS5 with optional RFC 1929 auth, 4 = SOCKS4/4a, else HTTP:
+  CONNECT tunnels, absolute-URI requests forwarded one per connection with
+  `Connection: close`). Every tunnel goes through `Options.Pick`'s upstream
+  via `proxy.Dial`; on failure the next upstream is tried (`MaxTries`) and,
+  unless per-conn, becomes current (failover). Rotation: sticky, per-conn,
+  interval. Requests for host `silkrouter.relay` from loopback are the
+  control API (`/status`, `/rotate`, `/stop`; `relay.Control` is the
+  client).
+- `px relay` picks with `pickProxy` (sticky / interval: verified picks;
+  per-conn: a cached ordered pool, round-robin, no verification), records
+  failed tunnels always and successful ones every `relay.sample_every` per
+  upstream as `route` facts with probe `relay`, and one usage row (mode
+  `relay`, cmd `relay`) per upstream stint. `--daemon` re-executes itself
+  detached (`detach_unix.go` setsid / `detach_windows.go`
+  DETACHED_PROCESS), logging to `<home>/logs/relay.log`; `<home>/run/relay.json`
+  holds pid / address while it runs.
+- `px on --relay` exports `ALL_PROXY=socks5h://addr` and
+  `HTTP(S)_PROXY=http://addr` (`shell.Session.HTTPProxy`), starting the
+  relay with the same selection flags when nothing answers.
 
 ## TUI (`internal/tui`)
 
