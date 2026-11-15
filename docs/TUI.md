@@ -3,7 +3,7 @@
 `px tui` (alias `px ui`) is a full-screen interface over the database:
 browse, filter and inspect every proxy, tag and block them, check them on
 demand, read the usage log and its statistics, recompute ranks and edit the
-configuration. It needs an interactive terminal; scripts use `px proxies`,
+configuration, and start, follow and pause scans. It needs an interactive terminal; scripts use `px proxies`,
 `px history`, `px stats` and friends.
 
 ```sh
@@ -34,10 +34,10 @@ is open (search, tag prompt, config edit, palette).
 | # | Tab | What it shows |
 |---|-----|---------------|
 | 1 | Dashboard | proxies by status and scheme, alive latency buckets, best / median, facts, tags, recent scans, top commands of the week, the proxy of this shell (`SILKROUTER_ACTIVE` / `SILKROUTER_PROXY` / `SILKROUTER_SESSION`) |
-| 2 | Proxies | the proxy table (columns from `tui.columns`), `tui.page_size` rows per page; Enter opens the details: every field, scores, recent measurements, reputation verdicts, tags, usage |
+| 2 | Proxies | the proxy table (columns from `tui.columns`), `tui.page_size` rows per page; Enter opens the details: every field, scores, the HTTPS / TLS verdict (interception and the certificate issuer), recent measurements, reputation verdicts, tags, usage |
 | 3 | History | the usage log (time, mode, proxy, exit, took, ms, error, command); `g` cycles statistics grouped by proxy, cmd, err, day, hour, week, month, mode, session, tty, cwd |
 | 4 | Tags | every tag with its proxy count and kind (heuristic / manual); Enter shows the proxies carrying it |
-| 5 | Scans | scan runs with state and progress (running scans advance on refresh) |
+| 5 | Scans | scan runs with state and progress; start a scan (quick, full, reputation, geo, protocols) and follow it live |
 | 6 | Lists | reputation lists: kind, entries, age, errors |
 | 7 | Config | every key: value, origin (default / file / env), default, help |
 
@@ -66,6 +66,7 @@ click opens it, a click on a tab switches to it.
 | | `b` | toggle the manual `blocked` tag (route skips blocked proxies) |
 | | `c` | check now in the background (`probe.name` or `probe.test_url`, `check.tries`, `check.timeout`); the result is a `probe` measurement and updates the row |
 | | `y` | copy the URL with OSC 52 (works over SSH; tmux / screen wrapped) |
+| | `F` | full-scan the selected proxy in the background (see Scans) |
 | History | `g` | list → stats by proxy → cmd → err → day → ... (`esc` back to the list) |
 | | `s` | stats order: uses, last, fail, rate, key |
 | | `f` / `m` | result filter (ok, fail, proxy errors) / mode filter (route, shell, relay) |
@@ -74,7 +75,10 @@ click opens it, a click on a tab switches to it.
 | Tags | `enter` | the proxies carrying the tag (Proxies tab, every status) |
 | | `R` | recompute every heuristic tag now (`tags.*` thresholds) |
 | | `/` | filter tag names |
-| Scans | `k` | recompute scores and ranks (`scan.rank`), then the tags, like `px rank` |
+| Scans | `n` | new scan: the setup form (below) |
+| | `x` | pause the running scan (asks; resumable) |
+| | `esc` | hide the finished scan's panel |
+| | `k` | recompute scores and ranks (`scan.rank`), then the tags, like `px rank` (`↑` moves up here) |
 | Lists | `u` / `U` | download stale / all lists in the background |
 | Config | `enter` / `e` | edit the value in place: validated as you type, written like `px config set` |
 | | `x` | reset the key to its default (`px config reset KEY`) |
@@ -84,6 +88,57 @@ Edits rewrite `config.toml` in its canonical commented form and keep the
 previous file as `config.toml.bak`. `[tui]` keys apply immediately (theme,
 columns, page size, refresh, mouse, alternate screen, dead rows, markdown);
 a note appears when an environment variable overrides the edited key.
+
+## Scanning from the TUI
+
+Scans started here are the same runs as `px scan MODE`, with every knob at
+its config default (`scan.*`, `tags.auto`): recorded in the runs table,
+resumable, ranked and tagged at the end. One scan runs at a time.
+
+1. **Start.** `n` in the Scans tab opens the form:
+
+   ```
+    New scan
+    ▸ mode       ‹ quick ›       one probe per proxy: alive or dead, latency
+      selection  ‹ filter ›      what the Proxies tab shows (its filter and search)
+      restart    ‹ no ›          resume a paused run of the same mode and selection
+      targets    1,234 proxies · the proxy filter (status:alive · /185.199)
+   ```
+
+   `↑`/`↓` (or `tab`) choose the field, `←`/`→` (or space) change it,
+   `1`-`5` pick the mode (quick, full, reputation, geo, protocols),
+   `a` / `A` / `f` / `s` the selection (every proxy, the alive ones, the
+   Proxies tab's filter, the proxy selected there), `x` toggles restart,
+   `enter` starts, `esc` cancels. The form counts the targets and warns
+   when a paused run of that mode exists (it resumes when the selection is
+   the same, unless restart is on). Shortcuts: `:scan full alive`,
+   `:scan quick filter restart`, and `F` in the Proxies tab (full scan of
+   the selected proxy, from the table or its details).
+2. **Follow.** The panel above the runs table shows the mode, the
+   selection and the state (starting, running, pausing, done, paused),
+   a progress bar with done / total, the rate and the ETA, the alive /
+   dead / listed counts (and proxies that intercept TLS), the last proxy,
+   the scan's messages (`lists: 20/20 loaded`, ...), and the alive proxies
+   as they are found (latency, country, anonymity, listings, TLS). The run's
+   row in the table advances with it; the status bar shows the scan on
+   every tab.
+3. **Pause.** `x` (or `:scan stop`) asks, then pauses: the proxies in
+   flight finish, everything measured is kept, and the same scan started
+   again resumes where it stopped. Quitting while a scan runs asks first
+   (`tui.confirm_quit`) and pauses it the same way before exiting.
+4. **Result.** A toast sums it up (`full scan #12 done: 1,234/1,234 in 41m
+   · 312 alive · 922 dead · 41 listed · ranked 312`); the Proxies, Tags and
+   Dashboard tabs reload. `esc` hides the finished panel.
+
+### TLS interception
+
+A full scan's HTTPS check marks a proxy that presents a certificate that
+does not verify: it decrypts your HTTPS. Such a proxy gets the heuristic
+`mitm` tag, drawn in red everywhere, and route skips it by default
+(`route.exclude_tags = blocked, mitm`). The details show `https / tls:
+INTERCEPTED` with the certificate's issuer (or `ok`, `failed`, `not
+checked`); add `tls` to `tui.columns` for a TLS column (`MITM`, `ok`,
+`fail`, `-`).
 
 ## Command palette
 
@@ -104,6 +159,8 @@ abbreviated to a unique prefix.
 | `:check` | check the selected proxy now |
 | `:copy` | copy its URL (OSC 52) |
 | `:show ID\|URL\|HOST[:PORT]` | open a proxy's details |
+| `:scan MODE [all\|alive\|filter\|selected] [restart]` | start a scan (default: every proxy); `:scan` alone opens the form |
+| `:scan stop` | pause the running scan (asks) |
 | `:rank [MODE]` | recompute ranks (balanced, speed, clean, stable) and tags |
 | `:retag` | recompute the heuristic tags |
 | `:refresh` | reload the current tab |
@@ -125,8 +182,8 @@ Example: `:filter status=alive scheme=socks tag=fast max_ms=500`, then
 | `start_tab` | `dashboard` | tab shown on start (`--tab`) |
 | `mouse` | `true` | mouse support (`--no-mouse`) |
 | `alt_screen` | `true` | alternate screen (`--no-alt-screen`) |
-| `columns` | `id,proxy,status,last,avg,ok,fail,streak,cc,anon,bl,rank,tags` | proxy table columns; also available: `best`, `rate`, `checked`, `scheme`, `host`, `port`, `speed`, `clean`, `stable`, `uses`, `used`, `exit`, `org`, `source` |
-| `confirm_quit` | `true` | ask before quitting while a check runs |
+| `columns` | `id,proxy,status,last,avg,ok,fail,streak,cc,anon,bl,rank,tags` | proxy table columns; also available: `best`, `rate`, `checked`, `scheme`, `host`, `port`, `speed`, `clean`, `stable`, `uses`, `used`, `exit`, `org`, `source`, `tls` |
+| `confirm_quit` | `true` | ask before quitting while a check or a scan runs |
 | `markdown` | `true` | render the help with glamour (plain text otherwise) |
 | `default_sort` | `rank` | initial sort (`--sort`) |
 | `show_dead` | `false` | show dead proxies by default (`--dead`) |

@@ -178,6 +178,13 @@ func (v *detailView) content(m *Model) string {
 	var b strings.Builder
 
 	head := " " + s.Bold.Render(p.Key()) + "  " + s.Muted.Render("#"+strconv.FormatInt(p.ID, 10)) + "  " + s.statusPill(p.Status)
+	if p.TLSMITM != nil && *p.TLSMITM {
+		if s.plain {
+			head += "  [MITM]"
+		} else {
+			head += "  " + s.PillBad.Render("MITM")
+		}
+	}
 	if p.Rank != nil {
 		head += "  " + s.Accent.Render("rank "+iptr(p.Rank))
 	}
@@ -233,8 +240,9 @@ func (v *detailView) content(m *Model) string {
 		{"anonymity", s.anon(p.Anonymity).Render(dash(p.Anonymity))},
 		{"listed on", listed},
 	}
-	if p.HTTPSOK != nil {
-		right = append(right, kv{"https", yesNo(s, *p.HTTPSOK)})
+	right = append(right, kv{"https / tls", tlsLine(s, p)})
+	if p.TLSMITM != nil && *p.TLSMITM {
+		right = append(right, kv{"tls issuer", s.Bad.Render(dash(p.TLSIssuer))})
 	}
 	if len(p.Protocols) > 0 {
 		right = append(right, kv{"protocols", strings.Join(p.Protocols, " ")})
@@ -262,7 +270,7 @@ func (v *detailView) content(m *Model) string {
 	}
 	var tags []string
 	for _, t := range o.tags {
-		tags = append(tags, s.Tag.Render(t.Label()))
+		tags = append(tags, s.tagStyle(t.Label()).Render(t.Label()))
 	}
 	tagLine := s.Muted.Render("none (t adds one)")
 	if len(tags) > 0 {
@@ -344,11 +352,19 @@ func (v *detailView) content(m *Model) string {
 	return b.String()
 }
 
-func yesNo(s *Styles, b bool) string {
-	if b {
-		return s.Good.Render("yes")
+// tlsLine is the verdict of the full scan's HTTPS check: intercepted (a
+// certificate that does not verify: the proxy can read HTTPS), ok, failed
+// or not checked.
+func tlsLine(s *Styles, p *db.Proxy) string {
+	switch {
+	case p.TLSMITM != nil && *p.TLSMITM:
+		return s.Bad.Bold(true).Render("INTERCEPTED") + s.Muted.Render(" (it decrypts HTTPS)")
+	case p.HTTPSOK != nil && *p.HTTPSOK:
+		return s.Good.Render("ok") + s.Muted.Render(" (certificate verified)")
+	case p.HTTPSOK != nil:
+		return s.Warn.Render("failed")
 	}
-	return s.Bad.Render("no")
+	return s.Muted.Render("not checked (F: full scan)")
 }
 
 func prefixed(prefix, s string) string {

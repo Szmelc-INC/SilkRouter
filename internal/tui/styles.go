@@ -1,6 +1,8 @@
 package tui
 
 import (
+	"strings"
+
 	"github.com/charmbracelet/lipgloss"
 	"github.com/muesli/termenv"
 
@@ -224,6 +226,31 @@ func (s *Styles) anon(a string) lipgloss.Style {
 	default:
 		return s.Muted
 	}
+}
+
+// tagStyle colors a tag label: mitm (TLS interception) red, blocked and
+// flaky yellow, everything else the tag color.
+func (s *Styles) tagStyle(label string) lipgloss.Style {
+	tag, _, _ := strings.Cut(strings.TrimSuffix(label, "…"), ":")
+	switch tag {
+	case "mitm":
+		return s.Bad.Bold(true)
+	case "blocked", "flaky":
+		return s.Warn
+	}
+	return s.Tag
+}
+
+// tags renders space-separated tag labels, each in its tagStyle (widths
+// are unchanged, so it also works on padded / truncated table text).
+func (s *Styles) tags(text string) string {
+	words := strings.Split(text, " ")
+	for i, w := range words {
+		if w != "" {
+			words[i] = s.tagStyle(w).Render(w)
+		}
+	}
+	return strings.Join(words, " ")
 }
 
 // score colors a 0-100 score.
