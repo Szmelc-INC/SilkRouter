@@ -1,0 +1,110 @@
+# Maintainer: Szmelc-INC <https://github.com/Szmelc-INC>
+#
+# VCS package built from the main branch of the repository.
+# Local build from this checkout: `make pkg-arch` (runs makepkg here).
+
+pkgname=silkrouter-git
+_pkgname=silkrouter
+_branch=main
+pkgver=4.0.0.r0.g0000000
+pkgrel=1
+pkgdesc='Route any command through fast, scanned and ranked proxies (px / s-proxy / silkrouter): SQLite proxy database, full scans, usage log, shell integration and TUI'
+arch=('x86_64' 'aarch64' 'armv7h' 'i686')
+url='https://github.com/Szmelc-INC/SilkRouter'
+license=('MIT')
+depends=()
+makedepends=('git' 'go>=2:1.26')
+optdepends=(
+  'proxychains-ng: force every connection of a process tree through the proxy (px --chain, px shell --chain)'
+  'zsh: shell integration with p10k segment (px shell install)'
+  'zsh-theme-powerlevel10k: the silkrouter prompt segment'
+  'bash-completion: bash completion'
+)
+provides=('silkrouter' 'px' 's-proxy')
+conflicts=('silkrouter')
+options=('!lto')
+source=("${_pkgname}::git+${url}.git#branch=${_branch}")
+sha256sums=('SKIP')
+
+pkgver() {
+  cd "${_pkgname}"
+  local tag
+  if tag=$(git describe --long --tags --abbrev=7 2>/dev/null); then
+    printf '%s' "${tag#v}" | sed 's/\([^-]*-g\)/r\1/;s/-/./g'
+  else
+    printf '4.0.0.r%s.g%s' "$(git rev-list --count HEAD)" "$(git rev-parse --short=7 HEAD)"
+  fi
+}
+
+prepare() {
+  cd "${_pkgname}"
+  export GOPATH="${srcdir}/gopath" GOFLAGS='-modcacherw'
+  go mod download
+}
+
+_goenv() {
+  export GOPATH="${srcdir}/gopath"
+  export CGO_ENABLED=0 GOTOOLCHAIN=local
+  export GOFLAGS='-trimpath -mod=readonly -modcacherw'
+  _ldmode=
+  case "${CARCH}" in
+    x86_64|aarch64) GOFLAGS="-buildmode=pie ${GOFLAGS}"; _ldmode='-linkmode=internal' ;;
+  esac
+}
+
+build() {
+  cd "${_pkgname}"
+  _goenv
+  go build -ldflags "${_ldmode} -X main.version=${pkgver}" -o "${_pkgname}" .
+
+  # Generated files: completions, shell integration, example config.
+  local gen="${srcdir}/gen"
+  mkdir -p "${gen}/home" "${gen}/tmp"
+  # Hermetic: never read the builder's real config home or temp caches.
+  export SILKROUTER_HOME="${gen}/home" SILKROUTER_CONFIG= TMPDIR="${gen}/tmp" PX_LIST= NO_COLOR=1
+  ./"${_pkgname}" completion zsh  > "${gen}/_${_pkgname}"
+  ./"${_pkgname}" completion bash > "${gen}/${_pkgname}.bash"
+  ./"${_pkgname}" completion fish > "${gen}/${_pkgname}.fish"
+  local sh
+  for sh in zsh bash fish; do
+    ./"${_pkgname}" shell-init "${sh}" --bin "/usr/bin/${_pkgname}" > "${gen}/init.${sh}"
+  done
+  ./"${_pkgname}" -q config init --force
+  cp "${gen}/home/config.toml" "${gen}/config.toml.example"
+}
+
+check() {
+  cd "${_pkgname}"
+  _goenv
+  GOFLAGS='-trimpath -mod=readonly -modcacherw' go test ./...
+}
+
+package() {
+  cd "${_pkgname}"
+  local gen="${srcdir}/gen" n sh
+
+  install -Dm755 "${_pkgname}" "${pkgdir}/usr/bin/${_pkgname}"
+  for n in px s-proxy; do
+    ln -s "${_pkgname}" "${pkgdir}/usr/bin/${n}"
+  done
+
+  install -Dm644 "${gen}/_${_pkgname}" "${pkgdir}/usr/share/zsh/site-functions/_${_pkgname}"
+  install -Dm644 "${gen}/${_pkgname}.bash" "${pkgdir}/usr/share/bash-completion/completions/${_pkgname}"
+  install -Dm644 "${gen}/${_pkgname}.fish" "${pkgdir}/usr/share/fish/vendor_completions.d/${_pkgname}.fish"
+  for n in px s-proxy; do
+    ln -s "${_pkgname}" "${pkgdir}/usr/share/bash-completion/completions/${n}"
+    ln -s "${_pkgname}.fish" "${pkgdir}/usr/share/fish/vendor_completions.d/${n}.fish"
+  done
+
+  for sh in zsh bash fish; do
+    install -Dm644 "${gen}/init.${sh}" "${pkgdir}/usr/share/${_pkgname}/shell/init.${sh}"
+  done
+  install -Dm644 "${gen}/config.toml.example" "${pkgdir}/usr/share/${_pkgname}/config.toml.example"
+
+  install -Dm644 LICENSE "${pkgdir}/usr/share/licenses/${_pkgname}/LICENSE"
+  install -Dm644 README.md "${pkgdir}/usr/share/doc/${_pkgname}/README.md"
+  install -Dm644 docs/ARCHITECTURE-v4.md "${pkgdir}/usr/share/doc/${_pkgname}/ARCHITECTURE-v4.md"
+  if [[ -f docs/TUI.md ]]; then
+    install -Dm644 docs/TUI.md "${pkgdir}/usr/share/doc/${_pkgname}/TUI.md"
+  fi
+}

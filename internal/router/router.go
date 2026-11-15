@@ -42,8 +42,28 @@ type Options struct {
 	VerifyTimeout time.Duration
 	Fresh         bool
 	Verbose       bool
+	Quiet         bool // suppress the "[silkrouter] proxy: ..." banner
 	Probe         probe.Probe
 	Origin        source.Origin
+	SourceTimeout time.Duration // fresh-mode download timeout (0 = 30s)
+	// Pool, when non-nil, replaces loading CachePath: the candidates were
+	// already selected (e.g. from the database); an empty non-nil Pool
+	// means nothing matches. PoolLabel names it in messages.
+	Pool      []proxy.Proxy
+	PoolLabel string
+	// OnVerify, when set, receives every verification measurement (used
+	// to record preflight facts in the database).
+	OnVerify func(p proxy.Proxy, res probe.Result)
+	// OnChosen, when set, is called with the proxy about to be used.
+	OnChosen func(p proxy.Proxy)
+	// Ordered keeps the order of Pool (preferred proxies first) instead of
+	// shuffling it; verification walks it in that order.
+	Ordered bool
+	// Wrap, when set, rewrites the command line for the chosen proxy (e.g.
+	// proxychains4 -f conf cmd...); cleanup runs after the command exits.
+	Wrap func(p proxy.Proxy, args []string) (wrapped []string, cleanup func(), err error)
+	// ExtraEnv is appended to the command's environment.
+	ExtraEnv []string
 }
 
 // Run picks a proxy per opts and executes args through it. It returns the
@@ -58,8 +78,12 @@ func Run(ctx context.Context, opts Options, args []string) (int, error) {
 		return 1, err
 	}
 	if len(cand) == 0 {
-		return 1, fmt.Errorf("no proxies match (cache=%s %d-%dms want=%s)",
-			opts.CachePath, opts.MinMS, opts.MaxMS, wantLabel(opts))
+		label := "cache=" + opts.CachePath
+		if opts.PoolLabel != "" {
+			label = opts.PoolLabel
+		}
+		return 1, fmt.Errorf("no proxies match (%s %d-%dms want=%s)",
+			label, opts.MinMS, opts.MaxMS, wantLabel(opts))
 	}
 
 	// Auto verify policy: fresh proxies are untested -> verify; cache -> trust.
@@ -77,6 +101,9 @@ func Run(ctx context.Context, opts Options, args []string) (int, error) {
 		return 1, err
 	}
 
+	if opts.OnChosen != nil {
+		opts.OnChosen(chosen)
+	}
 	if opts.Verbose {
 		if exitIP == "" {
 			exitIP = probeExitIP(ctx, chosen, opts.VerifyTimeout)
@@ -86,7 +113,18 @@ func Run(ctx context.Context, opts Options, args []string) (int, error) {
 		}
 	}
 
-	return runCommand(ctx, chosen, args)
+	run := args
+	if opts.Wrap != nil {
+		wrapped, cleanup, err := opts.Wrap(chosen, args)
+		if err != nil {
+			return 1, err
+		}
+		if cleanup != nil {
+			defer cleanup()
+		}
+		run = wrapped
+	}
+	return runCommand(ctx, chosen, run, args[0], opts.Quiet, opts.ExtraEnv)
 }
 
 // selectCandidates gathers the pool of proxies to consider, before filtering.
@@ -101,11 +139,17 @@ func selectCandidates(ctx context.Context, opts Options) ([]proxy.Proxy, error) 
 
 	var pool []proxy.Proxy
 	if opts.Fresh {
-		ps, err := opts.Origin.Candidates(ctx, 30*time.Second)
+		timeout := opts.SourceTimeout
+		if timeout <= 0 {
+			timeout = 30 * time.Second
+		}
+		ps, err := opts.Origin.Candidates(ctx, timeout)
 		if err != nil {
 			return nil, fmt.Errorf("fetch fresh proxies: %w", err)
 		}
 		pool = ps
+	} else if opts.Pool != nil {
+		pool = append([]proxy.Proxy(nil), opts.Pool...)
 	} else {
 		ps, err := cache.Load(opts.CachePath)
 		if err != nil {
@@ -137,9 +181,11 @@ func selectCandidates(ctx context.Context, opts Options) ([]proxy.Proxy, error) 
 		filtered = append(filtered, p)
 	}
 
-	rand.Shuffle(len(filtered), func(i, j int) {
-		filtered[i], filtered[j] = filtered[j], filtered[i]
-	})
+	if !(opts.Ordered && opts.Pool != nil && !opts.Fresh) {
+		rand.Shuffle(len(filtered), func(i, j int) {
+			filtered[i], filtered[j] = filtered[j], filtered[i]
+		})
+	}
 	return filtered, nil
 }
 
@@ -175,6 +221,9 @@ func choose(ctx context.Context, opts Options, cand []proxy.Proxy, verify int) (
 	var lastErr error
 	for _, p := range cand {
 		res := opts.Probe.Measure(ctx, p, 1, opts.VerifyTimeout)
+		if opts.OnVerify != nil && (res.OK || ctx.Err() == nil) {
+			opts.OnVerify(p, res)
+		}
 		if res.OK {
 			return p, res.ExitIP, nil
 		}
@@ -193,19 +242,21 @@ func probeExitIP(ctx context.Context, p proxy.Proxy, timeout time.Duration) stri
 }
 
 // runCommand runs args with proxy env vars set, forwarding std streams, and
-// returns the child's exit code.
-func runCommand(ctx context.Context, p proxy.Proxy, args []string) (int, error) {
+// returns the child's exit code. name is the program shown in the banner.
+func runCommand(ctx context.Context, p proxy.Proxy, args []string, name string, quiet bool, extraEnv []string) (int, error) {
 	cmd := exec.CommandContext(ctx, args[0], args[1:]...)
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
-	cmd.Env = proxyEnv(os.Environ(), p.URL())
+	cmd.Env = append(ProxyEnv(os.Environ(), p.URL()), extraEnv...)
 
-	short := args[0]
+	short := name
 	if i := strings.LastIndexAny(short, `/\`); i >= 0 {
 		short = short[i+1:]
 	}
-	ui.Errf("[silkrouter] proxy: %s %s  |  cmd: %s\n", p.Scheme, p.Addr(), short)
+	if !quiet {
+		ui.Errf("[silkrouter] proxy: %s %s  |  cmd: %s\n", p.Scheme, p.Addr(), short)
+	}
 
 	if err := cmd.Run(); err != nil {
 		var ee *exec.ExitError
@@ -217,10 +268,13 @@ func runCommand(ctx context.Context, p proxy.Proxy, args []string) (int, error) 
 	return 0, nil
 }
 
-// proxyEnv returns env with the standard proxy variables (upper+lower case) set
+// ProxyVars are the variables ProxyEnv sets.
+var ProxyVars = []string{"ALL_PROXY", "HTTP_PROXY", "HTTPS_PROXY", "all_proxy", "http_proxy", "https_proxy"}
+
+// ProxyEnv returns env with the standard proxy variables (upper+lower case) set
 // to url, replacing any pre-existing ones.
-func proxyEnv(base []string, url string) []string {
-	keys := []string{"ALL_PROXY", "HTTP_PROXY", "HTTPS_PROXY", "all_proxy", "http_proxy", "https_proxy"}
+func ProxyEnv(base []string, url string) []string {
+	keys := ProxyVars
 	skip := make(map[string]struct{}, len(keys))
 	for _, k := range keys {
 		skip[k] = struct{}{}

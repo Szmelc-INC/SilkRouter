@@ -1,114 +1,95 @@
-// Command silkrouter is a single, dependency-free, cross-platform binary that
-// unifies the original SilkRouter bash toolkit:
+// Command silkrouter builds a fast local proxy cache and routes any command
+// through it. The same binary answers to px, s-proxy and silkrouter.
 //
-//	build/recache/list  - build & inspect a fast local proxy cache
-//	route               - run any command through a cached/random proxy
-//	check               - test proxies for liveness/latency
-//	blcheck             - check IP(s) against DNS blacklists (mxtoolbox)
-//	proxycheck          - check proxy/anonymity detection (whatismyipaddress)
-//
-// The whole thing is standard library only, so `go build` yields a static
-// binary for Linux or Windows with no runtime dependencies.
+// main only boots the command registry: every command lives in its own
+// cmd_*.go file and registers itself from init() (see internal/cli).
 package main
 
 import (
 	"context"
 	_ "embed"
-	"fmt"
 	"os"
 	"os/signal"
+	"syscall"
 
+	"github.com/szmelc-inc/silkrouter/internal/cache"
+	"github.com/szmelc-inc/silkrouter/internal/cli"
+	"github.com/szmelc-inc/silkrouter/internal/paths"
 	"github.com/szmelc-inc/silkrouter/internal/source"
-	"github.com/szmelc-inc/silkrouter/internal/ui"
 )
 
 // version is stamped at build time via -ldflags "-X main.version=..."; the
 // default keeps `silkrouter version` meaningful for `go build` users too.
-var version = "2.0.0-dev"
+var version = "4.0.0-dev"
 
-// builtinList is the consolidated proxy list, embedded so `--source builtin`
-// works completely offline.
+// builtinList is the consolidated proxy list, embedded so `-builtin` works
+// completely offline.
 //
 //go:embed proxy/LIST.txt
 var builtinList []byte
 
 func main() {
 	source.Builtin = builtinList
-	os.Exit(run(os.Args[1:]))
+	os.Exit(newApp().Run(signalContext(), os.Args))
 }
 
-func run(args []string) int {
-	if len(args) == 0 {
-		usage(os.Stderr)
-		return 2
+// newApp wires the default registry into the program: names, the legacy
+// px.sh fallthrough and the first-run hook.
+func newApp() *cli.App {
+	reg := cli.Default
+	reg.Fallback = "route"
+	build := cli.LegacyMode{Command: "build"}
+	fromFile := cli.LegacyMode{Command: "build", Forward: "-F", TakesValue: true}
+	reg.LegacyModes = map[string]cli.LegacyMode{
+		"-B": build, "--build": build,
+		"-R": {Command: "recache"}, "--recache": {Command: "recache"},
+		"-L": {Command: "list"}, "--list": {Command: "list"},
+		"-F": fromFile, "--file": fromFile,
+		"--fresh": {Command: "route", Forward: "-r"},
 	}
-	ctx := signalContext()
+	return &cli.App{
+		Registry: reg,
+		Name:     "SilkRouter",
+		Binary:   "silkrouter",
+		Aliases:  []string{"px", "s-proxy"},
+		Version:  version,
+		Tagline:  "route any command (or a whole shell) through fast, scanned, ranked proxies",
+		Usage: []cli.Example{
+			{Cmd: "[global options] <command> [options] [args]"},
+			{Cmd: "[route options] <program> [args...]", Desc: "legacy px.sh style: same as route"},
+			{Cmd: "-- <program> [args...]", Desc: "always route (even a subcommand's name)"},
+			{Cmd: "-B | -R | -L | -F FILE", Desc: "px.sh modes: build, recache, list, build -F"},
+		},
+		Examples: []cli.Example{
+			{Cmd: "build -probe cloudflare -j 200", Desc: "build a tested, sorted cache"},
+			{Cmd: "curl -s https://ifconfig.me", Desc: "route a command through a random cached proxy"},
+			{Cmd: "-s -d 500 git pull", Desc: "socks only, under 500 ms"},
+			{Cmd: "config set route.max_ms 500", Desc: "change a default"},
+			{Cmd: "completion zsh > ~/.zfunc/_silkrouter", Desc: "install shell completion"},
+		},
+		Setup: firstRun,
+	}
+}
 
-	cmd, rest := args[0], args[1:]
-	switch cmd {
-	case "route", "run":
-		return cmdRoute(ctx, rest)
-	case "build":
-		return cmdBuild(ctx, rest, false)
-	case "recache":
-		return cmdBuild(ctx, rest, true)
-	case "list", "ls":
-		return cmdList(ctx, rest)
-	case "check":
-		return cmdCheck(ctx, rest)
-	case "blcheck":
-		return cmdBLCheck(ctx, rest)
-	case "proxycheck":
-		return cmdProxyCheck(ctx, rest)
-	case "probes":
-		return cmdProbes(ctx, rest)
-	case "version", "-v", "--version":
-		fmt.Printf("silkrouter %s\n", version)
-		return 0
-	case "help", "-h", "--help":
-		usage(os.Stdout)
-		return 0
-	default:
-		ui.Errf("silkrouter: unknown command %q\n\n", cmd)
-		usage(os.Stderr)
-		return 2
+// firstRun imports a pre-v4 text cache ($PX_LIST or the v3 temp file) into
+// <home>/cache.list the first time it is missing. The database import of
+// that file happens in the db layer.
+func firstRun(ctx *cli.Context) error {
+	src, n, err := cache.ImportLegacy(paths.LegacyCache(), paths.LegacyCandidates())
+	if err != nil {
+		return err
 	}
+	if src != "" {
+		ctx.Infof("imported legacy cache %s (%d proxies) -> %s", src, n, paths.Pretty(paths.LegacyCache()))
+	}
+	return nil
 }
 
 // signalContext returns a context cancelled on the first SIGINT/SIGTERM, so
 // long-running builds stop cleanly and keep whatever they gathered so far.
 func signalContext() context.Context {
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	// stop is intentionally not deferred: the context lives for the process.
 	_ = stop
 	return ctx
-}
-
-func usage(w *os.File) {
-	fmt.Fprintf(w, `silkrouter %s - build a proxy cache and route commands through it
-
-usage:
-  silkrouter <command> [options]
-
-commands:
-  route      run a command through a cached/random proxy
-  build      build/append the proxy cache (test & sort proxies)
-  recache    re-test the proxies already in the cache (prune dead)
-  list       print a report of the current cache
-  check      test a single proxy or a file of proxies
-  blcheck    check IP(s) against ~60 DNS blacklists (mxtoolbox)
-  proxycheck check proxy/anonymity detection (whatismyipaddress)
-  probes     list the available caching probes
-  version    print the version
-  help       show this help
-
-Run "silkrouter <command> -h" for command-specific options.
-
-examples:
-  silkrouter build -probe cloudflare -j 200
-  silkrouter route -- curl -s https://ifconfig.me
-  silkrouter route -s -d 500 -- git pull
-  silkrouter check socks5://1.2.3.4:1080
-  silkrouter blcheck 8.8.8.8
-`, version)
 }

@@ -3,58 +3,114 @@ package main
 import (
 	"bufio"
 	"context"
-	"flag"
 	"fmt"
 	"os"
 	"strings"
 	"time"
 
+	"github.com/szmelc-inc/silkrouter/internal/cli"
+	"github.com/szmelc-inc/silkrouter/internal/config"
 	"github.com/szmelc-inc/silkrouter/internal/proxy"
 	"github.com/szmelc-inc/silkrouter/internal/scan"
 	"github.com/szmelc-inc/silkrouter/internal/ui"
 )
 
-// cmdBLCheck checks IP(s) against DNS blacklists via mxtoolbox.
-func cmdBLCheck(ctx context.Context, args []string) int {
-	fs := flag.NewFlagSet("blcheck", flag.ContinueOnError)
-	var (
-		file    = fs.String("f", "", "check every address in FILE (writes FILE-BL)")
-		token   = fs.String("token", os.Getenv("MXTB_TOKEN"), "mxtoolbox temp auth token")
-		delayS  = fs.Float64("d", 2, "delay between lookups in file mode (seconds)")
-		verbose = fs.Bool("v", false, "single-IP mode: list every blacklist")
-	)
-	fs.Usage = func() {
-		fmt.Fprint(os.Stderr, "usage: silkrouter blcheck [options] <ip>\n       silkrouter blcheck -f <file>\n\n")
-		fs.PrintDefaults()
-	}
-	if err := fs.Parse(args); err != nil {
-		return 2
-	}
-	if *file == "" && fs.NArg() == 0 {
-		fs.Usage()
-		return 2
+var blOpts struct {
+	file    string
+	token   string
+	delay   config.Duration
+	timeout config.Duration
+	verbose bool
+}
+
+var pxOpts struct {
+	file    string
+	output  string
+	timeout config.Duration
+	delay   config.Duration
+}
+
+func init() {
+	cli.Register(cli.Command{
+		Name:    "blcheck",
+		Group:   cli.GroupCheck,
+		Summary: "check IP(s) against ~60 DNS blacklists (mxtoolbox)",
+		Description: `Looks an IPv4 address up on mxtoolbox's DNS blacklist check. With -f FILE,
+every address found in FILE is checked and the results are written to
+FILE-BL. A temporary API token is fetched automatically unless -token (or
+$MXTB_TOKEN) is given.`,
+		Usage: "[options] <ip>\n-f <file>",
+		Flags: func(fs *cli.FlagSet) {
+			cfg := fs.Config
+			fs.String(&blOpts.file, "f,file", "", "check every address in FILE (writes FILE-BL)").
+				Placeholder("FILE").Files()
+			fs.String(&blOpts.token, "token", cfg.BLCheck.Token, "mxtoolbox temp auth token").
+				Placeholder("TOKEN").ConfigKey("blcheck.token").NoDefault()
+			fs.Duration(&blOpts.delay, "d,delay", cfg.BLCheck.Delay, "delay between lookups in file mode").
+				ConfigKey("blcheck.delay")
+			fs.Duration(&blOpts.timeout, "timeout", cfg.BLCheck.Timeout, "HTTP timeout per lookup").
+				ConfigKey("blcheck.timeout")
+			fs.Bool(&blOpts.verbose, "v,verbose", false, "single-IP mode: list every blacklist")
+		},
+		Examples: []cli.Example{
+			{Cmd: "blcheck 8.8.8.8"},
+			{Cmd: "blcheck -f proxies.txt -d 1"},
+		},
+		Run: runBLCheck,
+	})
+	cli.Register(cli.Command{
+		Name:    "proxycheck",
+		Group:   cli.GroupCheck,
+		Summary: "check proxy/anonymity detection (whatismyipaddress)",
+		Description: `Asks whatismyipaddress.com's proxy check whether the address looks like
+a proxy. Single target: ip, ip:port or scheme://ip:port. With -f FILE,
+every proxy in FILE is checked and the verdicts are written to FILE-PX
+(or -o OUTPUT).`,
+		Usage: "[options] <ip | ip:port | scheme://ip:port>\n-f <file> [-o <output>]",
+		Flags: func(fs *cli.FlagSet) {
+			cfg := fs.Config
+			fs.String(&pxOpts.file, "f,file", "", "bulk check every proxy in FILE").Placeholder("FILE").Files()
+			fs.String(&pxOpts.output, "o,output", "", "output file for -f mode (default: FILE-PX)").
+				Placeholder("FILE").Files()
+			fs.Duration(&pxOpts.timeout, "t,timeout", cfg.ProxyCheck.Timeout, "connect / request timeout").
+				ConfigKey("proxycheck.timeout")
+			fs.Duration(&pxOpts.delay, "d,delay", cfg.ProxyCheck.Delay, "delay between requests in bulk mode").
+				ConfigKey("proxycheck.delay")
+		},
+		Examples: []cli.Example{
+			{Cmd: "proxycheck socks5://1.2.3.4:1080"},
+			{Cmd: "proxycheck -f proxies.txt -d 2"},
+		},
+		Run: runProxyCheck,
+	})
+}
+
+// runBLCheck checks IP(s) against DNS blacklists via mxtoolbox.
+func runBLCheck(ctx *cli.Context, args []string) int {
+	if blOpts.file == "" && len(args) == 0 {
+		return ctx.UsageError("need an IP address or -f FILE")
 	}
 
-	chk := scan.NewBLChecker(*token, 20*time.Second)
+	chk := scan.NewBLChecker(blOpts.token, blOpts.timeout.D())
 	if err := chk.EnsureToken(ctx); err != nil {
-		ui.Errf("silkrouter: %v\n", err)
+		ctx.Errorf("%v", err)
 		return 2
 	}
 	c := ui.Colors()
 
-	if *file != "" {
-		return blFileMode(ctx, chk, *file, time.Duration(*delayS*float64(time.Second)))
+	if blOpts.file != "" {
+		return blFileMode(ctx, chk, blOpts.file, blOpts.delay.D())
 	}
 
 	// Single-IP mode.
-	ip := scan.ExtractIP(fs.Arg(0))
+	ip := scan.ExtractIP(args[0])
 	if ip == "" {
-		ui.Errf("silkrouter: no IPv4 found in %q\n", fs.Arg(0))
+		ctx.Errorf("no IPv4 found in %q", args[0])
 		return 1
 	}
 	res, err := chk.Lookup(ctx, ip)
 	if err != nil {
-		ui.Errf("silkrouter: %v\n", err)
+		ctx.Errorf("%v", err)
 		return 1
 	}
 	if !res.Parsed {
@@ -69,7 +125,7 @@ func cmdBLCheck(ctx context.Context, args []string) int {
 	} else {
 		fmt.Printf("%s%s%s  %s[0/%d]%s  %sclean%s\n", c.Green, ip, c.Reset, c.Bold, res.Total, c.Reset, c.Green, c.Reset)
 	}
-	_ = verbose // verbose per-blacklist listing folds into the LISTED names above
+	_ = blOpts.verbose || ctx.Verbose // per-blacklist listing folds into the LISTED names above
 	return 0
 }
 
@@ -120,36 +176,21 @@ func blFileMode(ctx context.Context, chk *scan.BLChecker, path string, delay tim
 	return 0
 }
 
-// cmdProxyCheck checks proxy/anonymity detection via whatismyipaddress.com.
-func cmdProxyCheck(ctx context.Context, args []string) int {
-	fs := flag.NewFlagSet("proxycheck", flag.ContinueOnError)
-	var (
-		file     = fs.String("f", "", "bulk check every proxy in FILE")
-		output   = fs.String("o", "", "output file for -f mode (default: FILE-PX)")
-		timeoutS = fs.Int("t", 8, "curl connect/max timeout (seconds)")
-		delayS   = fs.Float64("d", 0, "delay between requests in bulk mode (seconds)")
-	)
-	fs.Usage = func() {
-		fmt.Fprint(os.Stderr, "usage: silkrouter proxycheck [options] <ip|ip:port|proto://ip:port>\n       silkrouter proxycheck -f <file>\n\n")
-		fs.PrintDefaults()
+// runProxyCheck checks proxy/anonymity detection via whatismyipaddress.com.
+func runProxyCheck(ctx *cli.Context, args []string) int {
+	if pxOpts.file == "" && len(args) == 0 {
+		return ctx.UsageError("need a target or -f FILE")
 	}
-	if err := fs.Parse(args); err != nil {
-		return 2
-	}
-	if *file == "" && fs.NArg() == 0 {
-		fs.Usage()
-		return 2
-	}
-	chk := scan.PXChecker{Timeout: time.Duration(*timeoutS) * time.Second}
+	chk := scan.PXChecker{Timeout: pxOpts.timeout.D()}
 	c := ui.Colors()
 
-	if *file != "" {
-		return pxFileMode(ctx, chk, *file, *output, time.Duration(*delayS*float64(time.Second)))
+	if pxOpts.file != "" {
+		return pxFileMode(ctx, chk, pxOpts.file, pxOpts.output, pxOpts.delay.D())
 	}
 
-	p, err := scan.ParseTarget(fs.Arg(0))
+	p, err := scan.ParseTarget(args[0])
 	if err != nil {
-		ui.Errf("silkrouter: %v\n", err)
+		ctx.Errorf("%v", err)
 		return 1
 	}
 	res := chk.Check(ctx, p)

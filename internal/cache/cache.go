@@ -12,15 +12,42 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/szmelc-inc/silkrouter/internal/paths"
 	"github.com/szmelc-inc/silkrouter/internal/proxy"
 )
 
-// DefaultPath returns the cache location, honouring $PX_LIST, else a temp file.
+// DefaultPath returns the cache location, honouring $PX_LIST, else
+// <config home>/cache.list. Commands use config.Config.CacheFile instead,
+// which also honours the cache.file config key.
 func DefaultPath() string {
-	if v := os.Getenv("PX_LIST"); v != "" {
-		return v
+	if v := os.Getenv(paths.EnvLegacyList); v != "" {
+		return paths.ExpandUser(v)
 	}
-	return filepath.Join(os.TempDir(), "silkrouter-proxy.list")
+	return paths.LegacyCache()
+}
+
+// ImportLegacy copies the first candidate that holds at least one valid
+// proxy to dst (normalised and sorted), unless dst already exists. It
+// returns the source used ("" when nothing was imported) and the number of
+// proxies written.
+func ImportLegacy(dst string, candidates []string) (string, int, error) {
+	if _, err := os.Stat(dst); err == nil {
+		return "", 0, nil
+	}
+	for _, src := range candidates {
+		if src == "" || filepath.Clean(src) == filepath.Clean(dst) {
+			continue
+		}
+		ps, err := Load(src)
+		if err != nil || len(ps) == 0 {
+			continue
+		}
+		if err := Save(dst, ps); err != nil {
+			return src, 0, fmt.Errorf("import legacy cache %s: %w", src, err)
+		}
+		return src, len(ps), nil
+	}
+	return "", 0, nil
 }
 
 // Load parses the cache file, skipping blank/comment/invalid lines. A missing
