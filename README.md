@@ -375,9 +375,12 @@ HTTP `Proxy-Authorization`); without it the relay should stay on loopback.
 ### Interface: `tui`
 
 `px tui` opens the interactive UI: dashboard, proxies (search, sort, filter,
-detail pane, tag / block / check the selected proxy), history and stats, tags,
-scan runs, lists and an inline config editor, with a `:` command palette and
-a `?` help overlay. See [docs/TUI.md](docs/TUI.md).
+detail pane with the TLS interception verdict, tag / block / check / full-scan
+the selected proxy), history and stats, tags, scans (start any mode on all,
+alive, the current filter or the selected proxy; live progress; pause and
+resume), lists and an inline config editor, with a `:` command palette
+(`:scan full alive`, `:sort rank`, `:tag add pinned`, ...) and a `?` help
+overlay. See [docs/TUI.md](docs/TUI.md).
 
 ### Database: `db`, `proxies`, `show`
 
