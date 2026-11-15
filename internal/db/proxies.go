@@ -23,7 +23,7 @@ const proxyCols = `p.id, p.scheme, p.host, p.port, p.username, p.password, p.sou
 	p.clean_score, p.rank,
 	p.protocols, p.https_ok, p.jitter_ms, p.region, p.city, p.isp, p.hosting, p.mobile,
 	p.full_scan_at, p.stable_score, p.use_count, p.use_ok, p.use_fail, p.use_proxy_err,
-	p.last_used_at, p.last_cmd`
+	p.last_used_at, p.last_cmd, p.tls_mitm, p.tls_issuer`
 
 type scanner interface{ Scan(dest ...any) error }
 
@@ -33,8 +33,9 @@ func scanProxy(s scanner, extra ...any) (*Proxy, error) {
 	var avg, speed, clean sql.NullFloat64
 	var exitIP, country, asn, org sql.NullString
 	var protocols, region, city, isp, lastCmd sql.NullString
-	var httpsOK, hosting, mobile, fullScan, lastUsed sql.NullInt64
+	var httpsOK, hosting, mobile, fullScan, lastUsed, mitm sql.NullInt64
 	var jitter, stable sql.NullFloat64
+	var issuer sql.NullString
 	dest := []any{&p.ID, &p.Scheme, &p.Host, &p.Port, &p.Username, &p.Password, &p.Source,
 		&added, &seen, &p.Status, &checked, &lastMS, &bestMS,
 		&avg, &p.MSCount, &p.MSSum, &p.OKCount, &p.FailCount, &p.OKStreak, &p.FailStreak,
@@ -42,7 +43,7 @@ func scanProxy(s scanner, extra ...any) (*Proxy, error) {
 		&clean, &rank,
 		&protocols, &httpsOK, &jitter, &region, &city, &isp, &hosting, &mobile,
 		&fullScan, &stable, &p.UseCount, &p.UseOK, &p.UseFail, &p.UseProxyErr,
-		&lastUsed, &lastCmd}
+		&lastUsed, &lastCmd, &mitm, &issuer}
 	if err := s.Scan(append(dest, extra...)...); err != nil {
 		return nil, err
 	}
@@ -56,6 +57,7 @@ func scanProxy(s scanner, extra ...any) (*Proxy, error) {
 		p.Protocols = strings.Split(protocols.String, ",")
 	}
 	p.HTTPSOK, p.Hosting, p.Mobile = nullBoolPtr(httpsOK), nullBoolPtr(hosting), nullBoolPtr(mobile)
+	p.TLSMITM, p.TLSIssuer = nullBoolPtr(mitm), issuer.String
 	if jitter.Valid {
 		p.JitterMS = &jitter.Float64
 	}
@@ -432,7 +434,9 @@ const setInfoSQL = `UPDATE proxies SET
 	https_ok     = coalesce(?, https_ok),
 	jitter_ms    = coalesce(?, jitter_ms),
 	protocols    = coalesce(?, protocols),
-	full_scan_at = coalesce(?, full_scan_at)
+	full_scan_at = coalesce(?, full_scan_at),
+	tls_mitm     = coalesce(?, tls_mitm),
+	tls_issuer   = CASE WHEN ? IS NOT NULL THEN nullif(?, '') ELSE tls_issuer END
 	WHERE id = ?`
 
 // infoTx applies ProxyInfo rows inside tx (resolving Addr when ProxyID is
@@ -469,7 +473,7 @@ func infoTx(ctx context.Context, tx *sql.Tx, infos []ProxyInfo) error {
 		if _, err := stmt.ExecContext(ctx, nullStr(in.Country), nullStr(in.Region), nullStr(in.City),
 			nullStr(in.ASN), nullStr(in.Org), nullStr(in.ISP), nullStr(in.Anonymity),
 			boolArg(in.Hosting), boolArg(in.Mobile), boolArg(in.HTTPSOK), floatArg(in.JitterMS),
-			protocols, ms(in.FullScanAt), in.ProxyID); err != nil {
+			protocols, ms(in.FullScanAt), boolArg(in.TLSMITM), boolArg(in.TLSMITM), in.TLSIssuer, in.ProxyID); err != nil {
 			return fmt.Errorf("db: info for proxy #%d: %w", in.ProxyID, err)
 		}
 	}

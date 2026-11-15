@@ -82,7 +82,8 @@ func TestComputeAndTags(t *testing.T) {
 	now := time.Now()
 	if err := d.SetInfo(ctx,
 		db.ProxyInfo{ProxyID: fast, Anonymity: "elite", HTTPSOK: db.Bool(true), FullScanAt: now},
-		db.ProxyInfo{ProxyID: dirty, Anonymity: "transparent", FullScanAt: now},
+		db.ProxyInfo{ProxyID: dirty, Anonymity: "transparent", FullScanAt: now, HTTPSOK: db.Bool(false),
+			TLSMITM: db.Bool(true), TLSIssuer: "Evil Proxy CA"},
 	); err != nil {
 		t.Fatal(err)
 	}
@@ -151,8 +152,12 @@ func TestComputeAndTags(t *testing.T) {
 	if strings.Contains(ls, "fast") || strings.Contains(ls, "fav:") || !strings.Contains(ls, "stable") {
 		t.Errorf("slow proxy tags: %s", ls)
 	}
-	if ld := labels(dirty); !strings.Contains(ld, "tor") || strings.Contains(ld, "clean") {
+	if ld := labels(dirty); !strings.Contains(ld, "tor") || !strings.Contains(ld, "mitm") || strings.Contains(ld, "clean") ||
+		strings.Contains(ld, "https") {
 		t.Errorf("dirty proxy tags: %s", ld)
+	}
+	if p := get(dirty); p.TLSMITM == nil || !*p.TLSMITM || p.TLSIssuer != "Evil Proxy CA" {
+		t.Errorf("tls columns: %+v", p)
 	}
 	if lfl := labels(flaky); !strings.Contains(lfl, "flaky") {
 		t.Errorf("flaky proxy tags: %s", lfl)

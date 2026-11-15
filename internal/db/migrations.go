@@ -26,6 +26,16 @@ type Migration struct {
 var migrations = []Migration{
 	{Version: 1, Name: "core schema", Up: execAll(schemaV1...)},
 	{Version: 2, Name: "full scans, usage counters", Up: execAll(schemaV2...)},
+	{Version: 3, Name: "tls interception", Up: execAll(schemaV3...)},
+}
+
+// schemaV3 records TLS interception found by the HTTPS check of full
+// scans: tls_mitm = 1 when the proxy presented a certificate that does not
+// verify for the requested host (it decrypts HTTPS), tls_issuer = the
+// issuer of that certificate.
+var schemaV3 = []string{
+	`ALTER TABLE proxies ADD COLUMN tls_mitm INTEGER`,
+	`ALTER TABLE proxies ADD COLUMN tls_issuer TEXT`,
 }
 
 // schemaV2 adds what full scans learn about a proxy and the per-proxy usage

@@ -135,35 +135,36 @@ type DBConfig struct {
 
 // ScanConfig configures 'px scan' (quick / full / reputation / geo / protocols).
 type ScanConfig struct {
-	Workers      int      `toml:"workers" help:"proxies scanned in parallel (full scans stay gentle)" min:"1"`
-	QuickWorkers int      `toml:"quick_workers" help:"proxies tested in parallel by 'scan quick'" min:"1"`
-	Tries        int      `toml:"tries" help:"samples per probe in a full scan (latency and jitter)" min:"1"`
-	Timeout      Duration `toml:"timeout" help:"timeout of one check"`
-	Delay        Duration `toml:"delay" help:"pause between two checks of the same proxy (gentle mode)"`
-	Probes       []string `toml:"probes" help:"connectivity probes a full scan runs on every proxy (px probes)"`
-	FailFast     int      `toml:"fail_fast" help:"stop checking a proxy after this many probes failed completely (0 = never)" min:"0"`
-	ExitProbe    string   `toml:"exit_probe" help:"probe that reveals the exit IP"`
-	HTTPSURL     string   `toml:"https_url" help:"HTTPS URL fetched through the proxy (TLS / CONNECT check; Cloudflare trace also yields the exit country)"`
-	JudgeURL     string   `toml:"judge_url" help:"header-echo URL that grades anonymity (transparent / anonymous / elite)"`
-	RealIPURL    string   `toml:"real_ip_url" help:"URL fetched directly (no proxy) once per scan to learn your real IP"`
-	Protocols    bool     `toml:"protocols" help:"also detect which protocols each address speaks (http, socks4, socks5)"`
-	DNSBL        bool     `toml:"dnsbl" help:"look exit IPs up on DNS blacklists"`
-	DNSBLZones   []string `toml:"dnsbl_zones" help:"DNS blacklist zones queried"`
-	DNSTimeout   Duration `toml:"dns_timeout" help:"timeout of one DNS blacklist lookup"`
-	Lists        bool     `toml:"lists" help:"match IPs against downloaded known-proxy / tor / abuse / datacenter lists"`
-	ListNames    []string `toml:"list_names" help:"lists used by scans (px lists shows all; empty = every built-in list)"`
-	ListsTTL     Duration `toml:"lists_ttl" help:"re-download a list when the local copy is older than this"`
-	CustomLists  []string `toml:"custom_lists" help:"extra IP lists, each NAME|KIND|URL (kind: ipset, proxylist, torexit, datacenter)"`
-	Geo          string   `toml:"geo" help:"geolocation / ASN provider queried directly for exit IPs" choices:"ip-api|none"`
-	GeoURL       string   `toml:"geo_url" help:"ip-api compatible batch endpoint"`
-	MXToolbox    bool     `toml:"mxtoolbox" help:"also run the mxtoolbox blacklist lookup in full scans (slow, scraped)"`
-	WIMIA        bool     `toml:"wimia" help:"also run the whatismyipaddress proxy check in full scans (often Cloudflare-blocked)"`
-	Resume       bool     `toml:"resume" help:"resume an interrupted scan of the same mode unless --restart is given"`
-	Rank         string   `toml:"rank" help:"order the rank column follows after a scan" choices:"balanced|speed|clean|stable"`
-	WeightSpeed  float64  `toml:"weight_speed" help:"weight of the speed score in the balanced rank" min:"0"`
-	WeightClean  float64  `toml:"weight_clean" help:"weight of the clean (reputation / anonymity) score in the balanced rank" min:"0"`
-	WeightStable float64  `toml:"weight_stable" help:"weight of the stability score in the balanced rank" min:"0"`
-	SpeedRefMS   int      `toml:"speed_ref_ms" help:"latency that scores 50/100 on speed (lower = stricter)" min:"1"`
+	Workers        int      `toml:"workers" help:"proxies scanned in parallel (full scans stay gentle)" min:"1"`
+	QuickWorkers   int      `toml:"quick_workers" help:"proxies tested in parallel by 'scan quick'" min:"1"`
+	Tries          int      `toml:"tries" help:"samples per probe in a full scan (latency and jitter)" min:"1"`
+	Timeout        Duration `toml:"timeout" help:"timeout of one check"`
+	Delay          Duration `toml:"delay" help:"pause between two checks of the same proxy (gentle mode)"`
+	Probes         []string `toml:"probes" help:"connectivity probes a full scan runs on every proxy (px probes)"`
+	FailFast       int      `toml:"fail_fast" help:"stop checking a proxy after this many probes failed completely (0 = never)" min:"0"`
+	ExitProbe      string   `toml:"exit_probe" help:"probe that reveals the exit IP"`
+	HTTPSURL       string   `toml:"https_url" help:"HTTPS URL fetched through the proxy (TLS / CONNECT check, certificate verification; Cloudflare trace also yields the exit country)"`
+	HTTPSFallbacks []string `toml:"https_fallbacks" help:"HTTPS URLs tried next when https_url fails for another reason than TLS interception"`
+	JudgeURL       string   `toml:"judge_url" help:"header-echo URL that grades anonymity (transparent / anonymous / elite)"`
+	RealIPURL      string   `toml:"real_ip_url" help:"URL fetched directly (no proxy) once per scan to learn your real IP"`
+	Protocols      bool     `toml:"protocols" help:"also detect which protocols each address speaks (http, socks4, socks5)"`
+	DNSBL          bool     `toml:"dnsbl" help:"look exit IPs up on DNS blacklists"`
+	DNSBLZones     []string `toml:"dnsbl_zones" help:"DNS blacklist zones queried"`
+	DNSTimeout     Duration `toml:"dns_timeout" help:"timeout of one DNS blacklist lookup"`
+	Lists          bool     `toml:"lists" help:"match IPs against downloaded known-proxy / tor / abuse / datacenter lists"`
+	ListNames      []string `toml:"list_names" help:"lists used by scans (px lists shows all; empty = every built-in list)"`
+	ListsTTL       Duration `toml:"lists_ttl" help:"re-download a list when the local copy is older than this"`
+	CustomLists    []string `toml:"custom_lists" help:"extra IP lists, each NAME|KIND|URL (kind: ipset, proxylist, torexit, datacenter)"`
+	Geo            string   `toml:"geo" help:"geolocation / ASN provider queried directly for exit IPs" choices:"ip-api|none"`
+	GeoURL         string   `toml:"geo_url" help:"ip-api compatible batch endpoint"`
+	MXToolbox      bool     `toml:"mxtoolbox" help:"also run the mxtoolbox blacklist lookup in full scans (slow, scraped)"`
+	WIMIA          bool     `toml:"wimia" help:"also run the whatismyipaddress proxy check in full scans (often Cloudflare-blocked)"`
+	Resume         bool     `toml:"resume" help:"resume an interrupted scan of the same mode unless --restart is given"`
+	Rank           string   `toml:"rank" help:"order the rank column follows after a scan" choices:"balanced|speed|clean|stable"`
+	WeightSpeed    float64  `toml:"weight_speed" help:"weight of the speed score in the balanced rank" min:"0"`
+	WeightClean    float64  `toml:"weight_clean" help:"weight of the clean (reputation / anonymity) score in the balanced rank" min:"0"`
+	WeightStable   float64  `toml:"weight_stable" help:"weight of the stability score in the balanced rank" min:"0"`
+	SpeedRefMS     int      `toml:"speed_ref_ms" help:"latency that scores 50/100 on speed (lower = stricter)" min:"1"`
 }
 
 // TagsConfig configures the heuristic tags (stable, fast, fav:<cmd>, ...).
@@ -231,7 +232,7 @@ func Default() *Config {
 			VerifyTimeout: Seconds(8),
 			Pool:          "db",
 			Prefer:        "smart",
-			ExcludeTags:   []string{"blocked"},
+			ExcludeTags:   []string{"blocked", "mitm"},
 			Method:        "env",
 		},
 		Build:      BuildConfig{Workers: 200, Tries: 2, Timeout: Seconds(15)},
@@ -250,19 +251,20 @@ func Default() *Config {
 			ShowRecent:    15,
 		},
 		Scan: ScanConfig{
-			Workers:      32,
-			QuickWorkers: 200,
-			Tries:        3,
-			Timeout:      Seconds(10),
-			Delay:        Duration(150 * time.Millisecond),
-			Probes:       []string{"cloudflare", "google", "gstatic", "msft", "apple", "example"},
-			FailFast:     2,
-			ExitProbe:    "ipify",
-			HTTPSURL:     "https://www.cloudflare.com/cdn-cgi/trace",
-			JudgeURL:     "http://httpbin.org/get", // no show_env: that adds the host's own load-balancer headers
-			RealIPURL:    "https://api.ipify.org/",
-			Protocols:    true,
-			DNSBL:        true,
+			Workers:        32,
+			QuickWorkers:   200,
+			Tries:          3,
+			Timeout:        Seconds(10),
+			Delay:          Duration(150 * time.Millisecond),
+			Probes:         []string{"cloudflare", "google", "gstatic", "msft", "apple", "example"},
+			FailFast:       2,
+			ExitProbe:      "ipify",
+			HTTPSURL:       "https://www.cloudflare.com/cdn-cgi/trace",
+			HTTPSFallbacks: []string{"https://api.ipify.org/", "https://example.com/"},
+			JudgeURL:       "http://httpbin.org/get", // no show_env: that adds the host's own load-balancer headers
+			RealIPURL:      "https://api.ipify.org/",
+			Protocols:      true,
+			DNSBL:          true,
 			DNSBLZones: []string{
 				"zen.spamhaus.org", "bl.spamcop.net", "b.barracudacentral.org", "dnsbl.dronebl.org",
 				"rbl.efnetrbl.org", "psbl.surriel.com", "all.s5h.net", "dnsbl-1.uceprotect.net",

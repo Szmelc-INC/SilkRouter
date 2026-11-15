@@ -90,6 +90,7 @@ type facts struct {
 	anonymity  string
 	httpsOK    sql.NullInt64
 	hosting    sql.NullInt64
+	mitm       sql.NullInt64
 	repChecked bool
 	listed     map[string]int // list kind -> distinct lists
 }
@@ -134,7 +135,7 @@ func evaluate(id int64, f *facts, opts Options) *Scores {
 		v := round1(100 * ref / (ref + eff))
 		s.Speed = &v
 	}
-	if f.repChecked || f.anonymity != "unknown" || f.httpsOK.Valid {
+	if f.repChecked || f.anonymity != "unknown" || f.httpsOK.Valid || f.mitm.Valid {
 		v := clean(f)
 		s.Clean = &v
 	}
@@ -180,6 +181,9 @@ func clean(f *facts) float64 {
 	case "elite":
 	default:
 		v -= 5
+	}
+	if f.mitm.Valid && f.mitm.Int64 != 0 {
+		v -= 50 // it decrypts TLS: never trust it with HTTPS
 	}
 	if f.httpsOK.Valid && f.httpsOK.Int64 == 0 {
 		v -= 5
@@ -228,7 +232,7 @@ func RankScores(scores []*Scores, mode string) int {
 // load reads what scoring needs for every proxy.
 func load(ctx context.Context, q *sql.DB, recent int) (map[int64]*facts, error) {
 	out := map[int64]*facts{}
-	rows, err := q.QueryContext(ctx, `SELECT id, status, anonymity, https_ok, hosting, use_count, use_ok FROM proxies`)
+	rows, err := q.QueryContext(ctx, `SELECT id, status, anonymity, https_ok, hosting, tls_mitm, use_count, use_ok FROM proxies`)
 	if err != nil {
 		return nil, err
 	}
@@ -236,7 +240,7 @@ func load(ctx context.Context, q *sql.DB, recent int) (map[int64]*facts, error) 
 		f := &facts{listed: map[string]int{}}
 		var id int64
 		var status string
-		if err := rows.Scan(&id, &status, &f.anonymity, &f.httpsOK, &f.hosting, &f.useCount, &f.useOK); err != nil {
+		if err := rows.Scan(&id, &status, &f.anonymity, &f.httpsOK, &f.hosting, &f.mitm, &f.useCount, &f.useOK); err != nil {
 			rows.Close()
 			return nil, err
 		}

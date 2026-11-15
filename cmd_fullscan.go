@@ -2,13 +2,12 @@ package main
 
 import (
 	"context"
-	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/netip"
 	"os"
 	"sort"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -298,12 +297,6 @@ type scanRunOpts struct {
 	Key  string `json:"key"`
 }
 
-func filterKey(o filterOpts, args []string, extra ...string) string {
-	return fmt.Sprintf("%s|%s|%v|%v|%d|%d|%v|%s|%s|%d|%d|%s|%s|%s", o.status, o.scheme, o.socks, o.http, o.maxMS,
-		o.minMS, o.untimed, o.tag, o.country, o.listedMax, o.minStreak, o.source, o.search+" "+strings.Join(args, " "),
-		strings.Join(extra, ","))
-}
-
 func runScan(ctx *cli.Context, mode string, args []string) int {
 	o := &scanOpts
 	f, err := o.filter.build(args)
@@ -333,246 +326,67 @@ func runScan(ctx *cli.Context, mode string, args []string) int {
 	return withDB(ctx, func(d *db.DB) int { return doScan(ctx, d, mode, f, args, probes) })
 }
 
-func doScan(ctx *cli.Context, d *db.DB, mode string, f db.Filter, args []string, probes []probe.Probe) int {
+func doScan(ctx *cli.Context, d *db.DB, mode string, f db.Filter, _ []string, probes []probe.Probe) int {
 	o := &scanOpts
-	cfg := ctx.Config
 	ec := ctx.ErrColors()
 	bg := context.WithoutCancel(ctx)
-
-	// Resume: same mode, same selection.
-	key := filterKey(o.filter, args, mode, fmt.Sprint(f.FullScanBefore.IsZero()))
-	optsJSON, _ := json.Marshal(scanRunOpts{Mode: mode, Key: key})
-	var run *db.ScanRun
-	if prev, err := d.ResumableScanRun(ctx, mode); err == nil {
-		if !o.restart && prev.Opts == string(optsJSON) {
-			run = prev
-			if c, err := strconv.ParseInt(prev.Cursor, 10, 64); err == nil && c > 0 {
-				f.AfterID = c
-			}
-			ctx.Infof("resuming %s scan #%d at %d/%d (--restart starts over)", mode, prev.ID, prev.Done, prev.Total)
-		} else {
-			state := db.ScanFailed
-			if !o.restart {
-				ctx.Infof("note: %s scan #%d (%d/%d) used other filters; starting a new one", mode, prev.ID, prev.Done, prev.Total)
-				state = db.ScanPaused
-			}
-			_ = d.UpdateScanRun(bg, prev.ID, prev.Done, prev.Cursor, state, 0)
-		}
+	j := scanJob{
+		Mode: mode, Filter: f, Limit: o.filter.limit, Restart: o.restart,
+		Workers: o.workers, Tries: o.tries, Timeout: o.timeout.D(), Delay: o.delay.D(), Probes: probes,
+		NoDNSBL: o.noDNSBL, NoLists: o.noLists, NoGeo: o.noGeo, NoProto: o.noProto, NoJudge: o.noJudge,
+		NoHTTPS: o.noHTTPS, MXToolbox: o.mxtoolbox, WIMIA: o.wimia, Offline: o.offline,
+		Rank: o.rank, NoRank: o.noRank, NoTags: o.noTags,
+		Logf:   ctx.Infof,
+		Debugf: ctx.Debugf,
 	}
-	f.Sort, f.Reverse, f.Limit, f.Offset = "id", false, 0, 0
-	rows, err := d.ListProxies(ctx, f)
-	if err != nil {
+	var progress *scanProgress
+	j.OnStart = func(run *db.ScanRun, total, done int, extras string) {
+		ctx.Infof("%s scan #%d: %d proxies, %d workers%s", mode, run.ID, total-done, o.workers, extras)
+		progress = newScanProgress(ctx, mode, total, done)
+		stopProgress = progress.start()
+	}
+	j.OnReport = func(r scan.Report, done, _ int) {
+		if r.Alive && o.showAlive {
+			progress.clear()
+			printScanReport(ctx, r)
+		}
+		progress.update(done, r)
+	}
+	res, err := runScanJob(ctx, d, ctx.Config, j)
+	if stopProgress != nil {
+		stopProgress()
+		stopProgress = nil
+	}
+	switch {
+	case errors.Is(err, errNoMatch):
+		ctx.Errorf("no proxies match")
+		return 1
+	case err != nil:
 		ctx.Errorf("%v", err)
 		return 1
 	}
-	if o.filter.limit > 0 && len(rows) > o.filter.limit {
-		rows = rows[:o.filter.limit]
-	}
-	if len(rows) == 0 {
-		if run != nil {
-			_ = d.UpdateScanRun(bg, run.ID, run.Done, run.Cursor, db.ScanDone, 0)
-			ctx.Infof("%s scan #%d was already complete", mode, run.ID)
-			return 0
-		}
-		ctx.Errorf("no proxies match")
-		return 1
-	}
-	targets := make([]scan.Target, len(rows))
-	for i, p := range rows {
-		targets[i] = scan.Target{ID: p.ID, Proxy: p.ToProxy(), ExitIP: p.ExitIP}
-	}
-	done0 := 0
-	if run == nil {
-		id, err := d.CreateScanRun(ctx, db.ScanRun{Mode: mode, Total: len(targets), Opts: string(optsJSON)})
-		if err != nil {
-			ctx.Errorf("%v", err)
-			return 1
-		}
-		run = &db.ScanRun{ID: id, Mode: mode, Total: len(targets)}
-	} else {
-		done0 = run.Done
-		_ = d.UpdateScanRun(bg, run.ID, run.Done, run.Cursor, db.ScanRunning, 0)
-	}
-
-	eo := scan.Options{
-		Mode: mode, Workers: o.workers, Tries: o.tries, Timeout: o.timeout.D(), Delay: o.delay.D(),
-		Probes: probes, FailFast: cfg.Scan.FailFast, Protocols: !o.noProto,
-	}
-	if mode == scan.ModeQuick {
-		eo.Delay = 0
-	}
-	if mode == scan.ModeFull {
-		if cfg.Scan.ExitProbe != "" {
-			if p, err := probe.Get(cfg.Scan.ExitProbe); err == nil {
-				eo.ExitProbe = &p
-			}
-		}
-		if !o.noHTTPS {
-			eo.HTTPSURL = cfg.Scan.HTTPSURL
-		}
-		if !o.noJudge && cfg.Scan.JudgeURL != "" {
-			eo.JudgeURL = cfg.Scan.JudgeURL
-			if cfg.Scan.RealIPURL != "" {
-				ip, err := scan.RealIP(ctx, cfg.Scan.RealIPURL, o.timeout.D())
-				if err != nil {
-					ctx.Infof("warning: cannot learn your real IP (%v): transparent proxies look anonymous", err)
-				} else {
-					eo.RealIP = ip
-					ctx.Debugf("real IP: %s", ip)
-				}
-			}
-		}
-		if o.wimia {
-			eo.WIMIA = &scan.PXChecker{Timeout: o.timeout.D()}
-		}
-	}
-	if mode == scan.ModeFull || mode == scan.ModeReputation {
-		if !o.noLists {
-			m, err := listManager(cfg)
-			if err != nil {
-				ctx.Errorf("%v", err)
-				return 2
-			}
-			results := m.Load(ctx, !o.offline, false)
-			eo.Lists = reputation.Sets(results)
-			var bad []string
-			for _, r := range results {
-				if r.Set == nil {
-					bad = append(bad, r.Meta.Name)
-				}
-			}
-			msg := fmt.Sprintf("lists: %d/%d loaded", len(eo.Lists), len(results))
-			if len(bad) > 0 {
-				msg += " (unavailable: " + strings.Join(bad, ", ") + ")"
-			}
-			ctx.Infof("%s", msg)
-		}
-		if !o.noDNSBL && len(cfg.Scan.DNSBLZones) > 0 {
-			eo.DNSBL = &reputation.DNSBL{Zones: cfg.Scan.DNSBLZones, Timeout: cfg.Scan.DNSTimeout.D()}
-		}
-		if o.mxtoolbox {
-			chk := scan.NewBLChecker(cfg.BLCheck.Token, cfg.BLCheck.Timeout.D())
-			if err := chk.EnsureToken(ctx); err != nil {
-				ctx.Infof("warning: mxtoolbox disabled: %v", err)
-			} else {
-				eo.MXTB, eo.MXTBDelay = chk, cfg.BLCheck.Delay.D()
-			}
-		}
-	}
-	if (mode == scan.ModeFull || mode == scan.ModeGeo) && !o.noGeo && cfg.Scan.Geo == "ip-api" {
-		eo.Geo = &reputation.GeoClient{URL: cfg.Scan.GeoURL}
-	}
-
-	w := d.NewWriter(ctx, db.WriterOptions{
-		BatchSize: cfg.DB.BatchSize, FlushInterval: cfg.DB.FlushInterval.D(),
-		OnError: func(err error, n int) { ctx.Errorf("warning: database: %d rows not recorded: %v", n, err) },
-	})
-
-	// Cursor: the largest id such that every target up to it is done.
-	ids := make([]int64, len(targets))
-	for i, t := range targets {
-		ids[i] = t.ID
-	}
-	var mu sync.Mutex
-	doneSet := map[int64]bool{}
-	next := 0
-	cursor := run.Cursor
-	doneN := done0
-	lastSave := time.Now()
-	var reports []scan.Report
-	progress := newScanProgress(ctx, mode, len(targets)+done0, done0)
-	eo.OnDone = func(r scan.Report) {
-		mu.Lock()
-		defer mu.Unlock()
-		doneSet[r.ID] = true
-		doneN++
-		for next < len(ids) && doneSet[ids[next]] {
-			next++
-		}
-		if next > 0 {
-			cursor = strconv.FormatInt(ids[next-1], 10)
-		}
-		if r.Alive {
-			reports = append(reports, r)
-			if o.showAlive {
-				progress.clear()
-				printScanReport(ctx, r)
-			}
-		}
-		progress.update(doneN, r)
-		if time.Since(lastSave) > 2*time.Second {
-			lastSave = time.Now()
-			_ = d.UpdateScanRun(bg, run.ID, doneN, cursor, db.ScanRunning, 0)
-		}
-	}
-	eng := scan.New(eo, w)
-	ctx.Infof("%s scan #%d: %d proxies, %d workers%s", mode, run.ID, len(targets), o.workers, scanExtras(eo))
-	stop := progress.start()
-	runErr := eng.Run(ctx, targets)
-	stop()
-	if err := w.Close(); err != nil {
-		ctx.Errorf("warning: database: %v", err)
-	}
-	interrupted := runErr != nil
-	state := db.ScanDone
-	if interrupted {
-		state = db.ScanPaused
-	}
-	mu.Lock()
-	_ = d.UpdateScanRun(bg, run.ID, doneN, cursor, state, 0)
-	mu.Unlock()
-	_ = d.RefreshListed(bg)
-
-	st := eng.Stats()
-	elapsed := time.Since(st.Started)
-	var rankRes score.Result
-	var tagRes score.TagResult
-	if !o.noRank {
-		rankRes, err = score.Compute(bg, d, scoreOptions(ctx.Config, o.rank))
-		if err != nil {
-			ctx.Errorf("warning: ranking: %v", err)
-		}
-	}
-	if !o.noTags {
-		tagRes, err = score.RefreshTags(bg, d, tagOptions(ctx.Config))
-		if err != nil {
-			ctx.Errorf("warning: tags: %v", err)
-		}
-	}
 	summary := struct {
-		Run       int64          `json:"run"`
-		Mode      string         `json:"mode"`
-		State     string         `json:"state"`
-		Total     int            `json:"total"`
-		Done      int            `json:"done"`
-		Alive     int64          `json:"alive"`
-		Dead      int64          `json:"dead"`
-		Listed    int64          `json:"listed"`
-		ElapsedNS time.Duration  `json:"elapsed_ns"`
-		Writer    db.WriterStats `json:"writer"`
-		Ranked    int            `json:"ranked"`
-		Tags      map[string]int `json:"tags,omitempty"`
-		Best      []*db.Proxy    `json:"best,omitempty"`
-	}{run.ID, mode, state, len(targets) + done0, doneN, st.Alive, st.Dead, st.Listed, elapsed, w.Stats(),
-		rankRes.Ranked, tagRes.Counts, nil}
-	if o.top > 0 {
+		scanResult
+		Best []*db.Proxy `json:"best,omitempty"`
+	}{scanResult: res}
+	if o.top > 0 && res.Total > 0 {
 		summary.Best, _ = d.ListProxies(bg, db.Filter{Status: []string{db.StatusAlive}, Sort: "rank", Limit: o.top,
-			WithTags: true, IDs: aliveIDs(reports, mode)})
+			WithTags: true, IDs: aliveIDs(res.AliveIDs, mode)})
 	}
 	if o.json {
 		return ctx.JSON(summary)
 	}
-	if !ctx.Quiet {
+	if !ctx.Quiet && res.Total > 0 {
 		verdict := ec.Green + "done" + ec.Reset
-		if interrupted {
+		if res.Interrupted {
 			verdict = ec.Yellow + "paused" + ec.Reset + fmt.Sprintf(" (run '%s scan %s' again to resume)", ctx.Prog, mode)
 		}
 		fmt.Fprintf(ctx.Stderr, "%s%s scan #%d%s %s: %d/%d in %s  %s%d alive%s  %s%d dead%s  %s%d listed%s  %d facts, %d verdicts\n",
-			ec.Bold, mode, run.ID, ec.Reset, verdict, doneN, len(targets)+done0, roundDur(elapsed),
-			ec.Green, st.Alive, ec.Reset, ec.Red, st.Dead, ec.Reset, ec.Yellow, st.Listed, ec.Reset,
-			summary.Writer.Measurements, summary.Writer.Reputation)
-		if rankRes.Ranked > 0 {
-			fmt.Fprintf(ctx.Stderr, "ranked %d alive proxies (%s); tags: %s\n", rankRes.Ranked, o.rank, fmtTagCounts(tagRes.Counts))
+			ec.Bold, mode, res.Run, ec.Reset, verdict, res.Done, res.Total, roundDur(res.ElapsedNS),
+			ec.Green, res.Alive, ec.Reset, ec.Red, res.Dead, ec.Reset, ec.Yellow, res.Listed, ec.Reset,
+			res.Writer.Measurements, res.Writer.Reputation)
+		if res.Ranked > 0 {
+			fmt.Fprintf(ctx.Stderr, "ranked %d alive proxies (%s); tags: %s\n", res.Ranked, o.rank, fmtTagCounts(res.Tags))
 		}
 	}
 	if len(summary.Best) > 0 {
@@ -580,21 +394,20 @@ func doScan(ctx *cli.Context, d *db.DB, mode string, f db.Filter, args []string,
 		fmt.Fprintf(ctx.Stdout, "\n%sBest proxies%s %s(rank: %s)%s\n", c.Bold, c.Reset, c.Gray, o.rank, c.Reset)
 		printProxyTable(ctx, summary.Best)
 	}
-	if interrupted {
+	if res.Interrupted {
 		return 130
 	}
 	return 0
 }
 
+// stopProgress stops the running progress line (set by OnStart).
+var stopProgress func()
+
 // aliveIDs narrows the "best" table to what this scan found alive (all
 // alive proxies for modes that do not test liveness).
-func aliveIDs(rs []scan.Report, mode string) []int64 {
+func aliveIDs(ids []int64, mode string) []int64 {
 	if mode != scan.ModeFull && mode != scan.ModeQuick {
 		return nil
-	}
-	ids := make([]int64, 0, len(rs))
-	for _, r := range rs {
-		ids = append(ids, r.ID)
 	}
 	if len(ids) == 0 {
 		return []int64{-1}
@@ -609,7 +422,7 @@ func scanExtras(o scan.Options) string {
 	var parts []string
 	if o.Mode == scan.ModeFull {
 		parts = append(parts, fmt.Sprintf("%d probes x %d", len(o.Probes), o.Tries))
-		if o.HTTPSURL != "" {
+		if len(o.HTTPSURLs) > 0 {
 			parts = append(parts, "https")
 		}
 		if o.JudgeURL != "" {
@@ -677,7 +490,9 @@ func printScanReport(ctx *cli.Context, r scan.Report) {
 	if r.Anonymity != "" {
 		extra = append(extra, r.Anonymity)
 	}
-	if r.HTTPS != nil && *r.HTTPS {
+	if r.MITM != nil && *r.MITM {
+		extra = append(extra, c.Red+"TLS-MITM("+r.TLSIssuer+")"+c.Reset)
+	} else if r.HTTPS != nil && *r.HTTPS {
 		extra = append(extra, "https")
 	}
 	if len(r.Protocols) > 0 {

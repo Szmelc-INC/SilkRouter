@@ -114,6 +114,8 @@ type Proxy struct {
 	Mobile      *bool     `json:"mobile,omitempty"`
 	FullScanAt  time.Time `json:"full_scan_at,omitzero"`
 	StableScore *float64  `json:"stable_score,omitempty"`
+	TLSMITM     *bool     `json:"tls_mitm,omitempty"`   // presented a certificate that does not verify (decrypts HTTPS)
+	TLSIssuer   string    `json:"tls_issuer,omitempty"` // issuer of that certificate
 
 	// Usage counters (from usage_log).
 	UseCount    int       `json:"use_count"`
@@ -179,6 +181,8 @@ type ProxyInfo struct {
 	JitterMS   *float64
 	Protocols  []string
 	FullScanAt time.Time
+	TLSMITM    *bool
+	TLSIssuer  string
 }
 
 // Bool returns a pointer to b (for ProxyInfo fields).

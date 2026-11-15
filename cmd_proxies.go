@@ -489,6 +489,14 @@ func printShow(ctx *cli.Context, o *showOutput) {
 	kv("exit ip", dash(p.ExitIP))
 	kv("country / asn", fmt.Sprintf("%s / %s %s", dash(p.Country), dash(p.ASN), p.Org))
 	kv("anonymity", p.Anonymity)
+	switch {
+	case p.TLSMITM != nil && *p.TLSMITM:
+		kv("tls", c.Red+"INTERCEPTED (MITM): certificate by "+dash(p.TLSIssuer)+c.Reset)
+	case p.HTTPSOK != nil && *p.HTTPSOK:
+		kv("tls", c.Green+"https ok, certificate verified"+c.Reset)
+	case p.HTTPSOK != nil:
+		kv("tls", c.Yellow+"https failed"+c.Reset)
+	}
 	kv("listed on", fmt.Sprintf("%d list(s)", p.ListedCount))
 	if p.SpeedScore != nil || p.CleanScore != nil || p.Rank != nil {
 		kv("scores", fmt.Sprintf("speed %s  clean %s  rank %s", fptr(p.SpeedScore), fptr(p.CleanScore), iptr(p.Rank)))

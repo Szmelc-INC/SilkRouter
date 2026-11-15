@@ -3,13 +3,18 @@ package scan
 import (
 	"bufio"
 	"context"
+	"crypto/tls"
+	"crypto/x509"
+	"crypto/x509/pkix"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"math"
 	"net"
 	"net/http"
 	"net/netip"
+	"net/url"
 	"sort"
 	"strings"
 	"sync"
@@ -70,10 +75,11 @@ type Options struct {
 	Probes   []probe.Probe // full: all; quick: the first
 	FailFast int           // full: stop after this many probes failed completely (0 = never)
 
-	ExitProbe *probe.Probe // nil = skip
-	HTTPSURL  string       // "" = skip
-	JudgeURL  string       // "" = skip
-	RealIP    string       // your real IP, for transparent-proxy detection
+	ExitProbe *probe.Probe   // nil = skip
+	HTTPSURLs []string       // https check: primary URL, then fallbacks (empty = skip)
+	TLSRoots  *x509.CertPool // certificate roots for the https check (nil = system)
+	JudgeURL  string         // "" = skip
+	RealIP    string         // your real IP, for transparent-proxy detection
 	Protocols bool
 
 	DNSBL     *reputation.DNSBL // nil = skip
@@ -105,6 +111,8 @@ type Report struct {
 	ExitIP    string        `json:"exit_ip,omitempty"`
 	Country   string        `json:"country,omitempty"`
 	HTTPS     *bool         `json:"https,omitempty"`
+	MITM      *bool         `json:"tls_mitm,omitempty"` // TLS interception detected
+	TLSIssuer string        `json:"tls_issuer,omitempty"`
 	Anonymity string        `json:"anonymity,omitempty"`
 	Protocols []string      `json:"protocols,omitempty"`
 	Listed    int           `json:"listed"`  // lists / zones that list host or exit IP
@@ -312,7 +320,7 @@ func (e *Engine) full(ctx context.Context, t Target, r *Report) {
 			r.ExitIP = res.ExitIP
 		}
 	}
-	if e.opts.HTTPSURL != "" && e.pause(ctx) {
+	if len(e.opts.HTTPSURLs) > 0 && e.pause(ctx) {
 		e.https(ctx, t, r)
 	}
 	if e.opts.JudgeURL != "" && e.pause(ctx) {
@@ -331,7 +339,10 @@ func (e *Engine) full(ctx context.Context, t Target, r *Report) {
 
 // info writes what the scan learned beyond measurements.
 func (e *Engine) info(t Target, r *Report, samples []int) {
-	in := db.ProxyInfo{ProxyID: t.ID, Anonymity: r.Anonymity, HTTPSOK: r.HTTPS}
+	in := db.ProxyInfo{ProxyID: t.ID, Anonymity: r.Anonymity, HTTPSOK: r.HTTPS, TLSMITM: r.MITM}
+	if r.MITM != nil && *r.MITM {
+		in.TLSIssuer = r.TLSIssuer
+	}
 	if e.opts.Mode == ModeFull {
 		in.FullScanAt = time.Now().UTC()
 	}
@@ -415,46 +426,169 @@ func (e *Engine) probes(ctx context.Context, t Target, r *Report, probes []probe
 	return all
 }
 
-// https fetches HTTPSURL through the proxy (CONNECT + TLS). A Cloudflare
-// trace body ("ip=...\nloc=PL\n...") also yields the exit IP and country.
+// https checks TLS through the proxy. For each URL (https_url, then the
+// fallbacks) it tunnels to host:443, runs the TLS handshake itself and
+// verifies the certificate chain for that host. A certificate that does not
+// verify means the proxy intercepts TLS (it terminates the connection and
+// re-signs it): that is recorded (mitm, issuer) and no fallback is tried,
+// since it is a property of the proxy. Otherwise a GET is sent over the
+// verified connection; the first URL answering 2xx / 3xx passes. A
+// Cloudflare trace body ("ip=...\nloc=PL\n...") also yields exit IP and
+// country. Every attempt is an auxiliary fact (probe "https").
 func (e *Engine) https(ctx context.Context, t Target, r *Report) {
-	client := t.Proxy.Client(e.opts.Timeout)
-	defer client.CloseIdleConnections()
-	start := time.Now()
-	body, status, err := get(ctx, client, e.opts.HTTPSURL)
-	ms := max(1, int(time.Since(start).Milliseconds()))
-	ok := err == nil && status >= 200 && status < 400
-	m := db.Measurement{ProxyID: t.ID, Probe: ProbeHTTPS, OK: ok}
-	detail := map[string]any{"status": status}
-	if ok {
-		m.MS = ms
-		kv := parseTrace(body)
-		if ip := kv["ip"]; ip != "" {
-			m.ExitIP = ip
-			if r.ExitIP == "" {
-				r.ExitIP = ip
+	ok := false
+	for i, raw := range e.opts.HTTPSURLs {
+		if i > 0 && !e.pause(ctx) {
+			break
+		}
+		res := TLSFetch(ctx, t.Proxy, raw, e.opts.Timeout, e.opts.TLSRoots)
+		m := db.Measurement{ProxyID: t.ID, Probe: ProbeHTTPS, OK: res.OK}
+		detail := map[string]any{"url": raw, "status": res.Status}
+		if res.Verified != nil {
+			detail["verified"] = *res.Verified
+		}
+		if res.OK {
+			m.MS = res.MS
+			kv := parseTrace(res.Body)
+			if ip := kv["ip"]; ip != "" {
+				m.ExitIP = ip
+				if r.ExitIP == "" {
+					r.ExitIP = ip
+				}
 			}
-		}
-		if loc := kv["loc"]; len(loc) == 2 {
-			r.Country = loc
-		}
-		for _, k := range []string{"loc", "colo", "tls", "http", "warp"} {
-			if kv[k] != "" {
-				detail[k] = kv[k]
+			if loc := kv["loc"]; len(loc) == 2 {
+				r.Country = loc
 			}
-		}
-	} else {
-		if err == nil {
-			err = fmt.Errorf("unexpected status %d", status)
-			m.ErrClass = db.ErrHTTPStatus
+			for _, k := range []string{"loc", "colo", "tls", "http", "warp"} {
+				if kv[k] != "" {
+					detail[k] = kv[k]
+				}
+			}
 		} else {
-			m.ErrClass = probe.ClassifyErr(err)
+			m.ErrClass = res.ErrClass
+			if res.Err != nil {
+				detail["error"] = res.Err.Error()
+			}
 		}
-		detail["error"] = err.Error()
+		if res.MITM {
+			detail["mitm"] = true
+			detail["issuer"] = res.Issuer
+			detail["subject"] = res.Subject
+		}
+		m.Detail = jsonDetail(detail)
+		e.measure(m)
+		if res.Verified != nil {
+			mitm := res.MITM
+			r.MITM = &mitm
+			r.TLSIssuer = res.Issuer
+		}
+		if res.OK || res.MITM || ctx.Err() != nil {
+			ok = res.OK
+			break
+		}
 	}
-	m.Detail = jsonDetail(detail)
 	r.HTTPS = &ok
-	e.measure(m)
+}
+
+// TLSResult is the outcome of TLSFetch.
+type TLSResult struct {
+	OK       bool
+	MS       int
+	Status   int
+	Body     string
+	Verified *bool // nil when the handshake did not get that far
+	MITM     bool  // the certificate does not verify for the host
+	Issuer   string
+	Subject  string
+	Err      error
+	ErrClass string
+}
+
+// TLSFetch GETs rawURL through p with its own TLS handshake: the chain is
+// verified against roots (nil = the system pool) for the URL's host.
+func TLSFetch(ctx context.Context, p proxy.Proxy, rawURL string, timeout time.Duration, roots *x509.CertPool) TLSResult {
+	var res TLSResult
+	fail := func(err error, class string) TLSResult {
+		res.Err, res.ErrClass = err, class
+		if class == "" {
+			res.ErrClass = probe.ClassifyErr(err)
+		}
+		return res
+	}
+	u, err := url.Parse(rawURL)
+	if err != nil || u.Scheme != "https" || u.Hostname() == "" {
+		return fail(fmt.Errorf("bad https URL %q", rawURL), db.ErrOther)
+	}
+	host, port := u.Hostname(), u.Port()
+	if port == "" {
+		port = "443"
+	}
+	start := time.Now()
+	conn, err := p.Dial(ctx, net.JoinHostPort(host, port), timeout)
+	if err != nil {
+		return fail(err, "")
+	}
+	defer conn.Close()
+	_ = conn.SetDeadline(time.Now().Add(timeout))
+	tc := tls.Client(conn, &tls.Config{ServerName: host, InsecureSkipVerify: true, MinVersion: tls.VersionTLS12,
+		NextProtos: []string{"http/1.1"}})
+	if err := tc.HandshakeContext(ctx); err != nil {
+		return fail(fmt.Errorf("tls handshake: %w", err), db.ErrTLS)
+	}
+	certs := tc.ConnectionState().PeerCertificates
+	if len(certs) == 0 {
+		return fail(errors.New("tls: no certificate presented"), db.ErrTLS)
+	}
+	inter := x509.NewCertPool()
+	for _, c := range certs[1:] {
+		inter.AddCert(c)
+	}
+	verified := true
+	if _, err := certs[0].Verify(x509.VerifyOptions{DNSName: host, Roots: roots, Intermediates: inter}); err != nil {
+		verified = false
+		res.Verified, res.MITM = &verified, true
+		res.Issuer, res.Subject = certName(certs[0].Issuer), certName(certs[0].Subject)
+		return fail(fmt.Errorf("tls interception: certificate for %s not trusted (issuer %q): %w", host, res.Issuer, err), db.ErrTLS)
+	}
+	res.Verified = &verified
+	res.Issuer, res.Subject = certName(certs[0].Issuer), certName(certs[0].Subject)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
+	if err != nil {
+		return fail(err, db.ErrOther)
+	}
+	req.Header.Set("User-Agent", "Mozilla/5.0 (X11; Linux x86_64; rv:128.0) Gecko/20100101 Firefox/128.0")
+	req.Header.Set("Accept", "*/*")
+	req.Close = true
+	if err := req.Write(tc); err != nil {
+		return fail(err, "")
+	}
+	resp, err := http.ReadResponse(bufio.NewReader(tc), req)
+	if err != nil {
+		return fail(err, "")
+	}
+	defer resp.Body.Close()
+	data, _ := io.ReadAll(io.LimitReader(resp.Body, 256<<10))
+	res.Status, res.Body = resp.StatusCode, string(data)
+	if resp.StatusCode < 200 || resp.StatusCode >= 400 {
+		return fail(fmt.Errorf("unexpected status %d", resp.StatusCode), db.ErrHTTPStatus)
+	}
+	res.OK, res.MS = true, max(1, int(time.Since(start).Milliseconds()))
+	return res
+}
+
+// certName renders a certificate name compactly: "CN (O)".
+func certName(n pkix.Name) string {
+	cn := n.CommonName
+	org := strings.Join(n.Organization, ", ")
+	switch {
+	case cn != "" && org != "":
+		return cn + " (" + org + ")"
+	case cn != "":
+		return cn
+	case org != "":
+		return org
+	}
+	return n.String()
 }
 
 // proxyHeaders reveal that a request went through a proxy.

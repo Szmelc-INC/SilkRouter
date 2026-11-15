@@ -24,11 +24,12 @@ const (
 	TagTor         = "tor"         // a Tor exit
 	TagDatacenter  = "datacenter"  // hosting / datacenter range
 	TagKnown       = "known"       // on a known-proxy list (sites block these)
+	TagMITM        = "mitm"        // intercepts TLS (presents a certificate that does not verify)
 )
 
 // HeuristicTags lists every tag a refresh owns.
 var HeuristicTags = []string{TagStable, TagFast, TagFav, TagRecommended, TagClean, TagElite,
-	TagHTTPS, TagFlaky, TagTor, TagDatacenter, TagKnown}
+	TagHTTPS, TagFlaky, TagTor, TagDatacenter, TagKnown, TagMITM}
 
 // IsHeuristic reports whether tag is computed (not manual).
 func IsHeuristic(tag string) bool {
@@ -112,7 +113,7 @@ func RefreshFor(ctx context.Context, d *db.DB, o TagOptions, proxyID int64, cmd 
 	if err != nil {
 		return err
 	}
-	perProxy := []string{TagStable, TagFast, TagFav, TagClean, TagElite, TagHTTPS, TagFlaky, TagTor, TagDatacenter, TagKnown}
+	perProxy := []string{TagStable, TagFast, TagFav, TagClean, TagElite, TagHTTPS, TagFlaky, TagTor, TagDatacenter, TagKnown, TagMITM}
 	var mine []db.Tag
 	for _, t := range ts {
 		if t.Tag != TagRecommended {
@@ -202,7 +203,7 @@ func computeTags(ctx context.Context, q *sql.DB, o TagOptions, ids []int64, _ st
 
 	// Attribute tags straight from the proxies row.
 	rows, err = q.QueryContext(ctx, `SELECT p.id, p.status, p.anonymity, p.https_ok, p.hosting, p.full_scan_at,
-		p.listed_count, p.ok_count, p.fail_count,
+		p.listed_count, p.ok_count, p.fail_count, p.tls_mitm, coalesce(p.tls_issuer, ''),
 		(SELECT count(DISTINCT r.list_name) FROM reputation r WHERE r.listed = 1 AND r.list_kind = 'torexit' AND (r.ip = p.host OR r.ip = p.exit_ip)),
 		(SELECT count(DISTINCT r.list_name) FROM reputation r WHERE r.listed = 1 AND r.list_kind = 'datacenter' AND (r.ip = p.host OR r.ip = p.exit_ip)),
 		(SELECT count(DISTINCT r.list_name) FROM reputation r WHERE r.listed = 1 AND r.list_kind = 'proxylist' AND (r.ip = p.host OR r.ip = p.exit_ip))
@@ -213,19 +214,24 @@ func computeTags(ctx context.Context, q *sql.DB, o TagOptions, ids []int64, _ st
 	for rows.Next() {
 		var id int64
 		var status, anon string
-		var httpsOK, hosting, fullScan sql.NullInt64
+		var httpsOK, hosting, fullScan, mitm sql.NullInt64
+		var issuer string
 		var listed, okN, failN, tor, dc, known int
-		if err := rows.Scan(&id, &status, &anon, &httpsOK, &hosting, &fullScan, &listed, &okN, &failN, &tor, &dc, &known); err != nil {
+		if err := rows.Scan(&id, &status, &anon, &httpsOK, &hosting, &fullScan, &listed, &okN, &failN, &mitm, &issuer, &tor, &dc, &known); err != nil {
 			rows.Close()
 			return nil, err
 		}
-		if fullScan.Valid && listed == 0 && (anon == "elite" || anon == "anonymous") {
+		intercepts := mitm.Valid && mitm.Int64 != 0
+		if intercepts {
+			out = append(out, db.Tag{ProxyID: id, Tag: TagMITM, Reason: "TLS interception, certificate issuer " + dash(issuer)})
+		}
+		if fullScan.Valid && listed == 0 && !intercepts && (anon == "elite" || anon == "anonymous") {
 			out = append(out, db.Tag{ProxyID: id, Tag: TagClean, Reason: "full scan: on no list, " + anon})
 		}
 		if anon == "elite" {
 			out = append(out, db.Tag{ProxyID: id, Tag: TagElite, Reason: "no proxy headers, real IP hidden"})
 		}
-		if httpsOK.Valid && httpsOK.Int64 != 0 {
+		if httpsOK.Valid && httpsOK.Int64 != 0 && !intercepts {
 			out = append(out, db.Tag{ProxyID: id, Tag: TagHTTPS, Reason: "TLS through the proxy works"})
 		}
 		if n := okN + failN; status == db.StatusAlive && n >= o.FlakyMinFacts && float64(okN)/float64(n) < o.FlakyMaxRate {
@@ -385,4 +391,11 @@ func marks(n int) string {
 		s = append(s, '?')
 	}
 	return string(s)
+}
+
+func dash(s string) string {
+	if s == "" {
+		return "-"
+	}
+	return s
 }
