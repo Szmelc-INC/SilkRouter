@@ -1,12 +1,16 @@
 package main
 
 import (
+	"context"
+	"errors"
+	"fmt"
 	"os"
 	"strings"
 
 	"github.com/szmelc-inc/silkrouter/internal/cli"
 	"github.com/szmelc-inc/silkrouter/internal/config"
 	"github.com/szmelc-inc/silkrouter/internal/db"
+	"github.com/szmelc-inc/silkrouter/internal/scan"
 	"github.com/szmelc-inc/silkrouter/internal/tui"
 	"github.com/szmelc-inc/silkrouter/internal/ui"
 )
@@ -43,7 +47,10 @@ Seven tabs (keys 1-7, tab / shift+tab):
                err, day, ... (px stats)
   4 Tags       heuristic and manual tags; enter lists the proxies, R
                recomputes the heuristic tags
-  5 Scans      scan runs and their progress; k recomputes the ranks
+  5 Scans      scan runs; n starts a scan (quick, full, reputation, geo,
+               protocols over every proxy, the alive ones, the Proxies
+               filter or one proxy) with live progress, x pauses it;
+               k recomputes the ranks (F in Proxies full-scans a proxy)
   6 Lists      reputation lists (px lists); u downloads stale ones
   7 Config     every key with value, origin and default; enter edits it
                in place and writes config.toml like 'config set'
@@ -51,14 +58,16 @@ Seven tabs (keys 1-7, tab / shift+tab):
 ':' opens the command palette (tab completes): :tab NAME, :sort KEY
 [asc|desc], :filter status=alive scheme=socks tag=fast max_ms=500,
 :search TEXT, :tag add|rm NAME, :block, :unblock, :check, :rank [MODE],
-:refresh, :export FILE, :theme NAME, :set KEY VALUE, :help, :q. '?'
-shows every key of the current tab (markdown via glamour when
-tui.markdown is on).
+:scan MODE [all|alive|filter|selected] [restart], :scan stop, :refresh,
+:export FILE, :theme NAME, :set KEY VALUE, :help, :q. '?' shows every key
+of the current tab (markdown via glamour when tui.markdown is on).
 
-The visible tab reloads every tui.refresh; queries and checks run in the
-background, so the interface never blocks. --no-color / NO_COLOR give a
-plain, uncolored interface. Needs an interactive terminal; see
-docs/TUI.md.`,
+Scans started here are 'px scan' runs with the config defaults: one at a
+time, resumable, recorded in the runs table; quitting pauses a running
+scan cleanly. The visible tab reloads every tui.refresh; queries, checks
+and scans run in the background, so the interface never blocks.
+--no-color / NO_COLOR give a plain, uncolored interface. Needs an
+interactive terminal; see docs/TUI.md.`,
 		Usage:     "[options] [search...]",
 		NeedsHome: true,
 		Flags: func(fs *cli.FlagSet) {
@@ -139,6 +148,8 @@ func runTUI(ctx *cli.Context, args []string) int {
 			ScoreOptions: scoreOptions,
 			TagOptions:   tagOptions,
 			ListManager:  listManager,
+			StartScan:    tuiScanner(d),
+			Notice:       ctx.Infof,
 			// Input / Output: the process's stdin / stdout (Bubble Tea's
 			// defaults, raw mode and all).
 		})
@@ -148,4 +159,33 @@ func runTUI(ctx *cli.Context, args []string) int {
 		}
 		return 0
 	})
+}
+
+// tuiScanner runs the TUI's scans with px scan's job runner: every knob at
+// its config default (the TUI's current config), the TUI's selection, and
+// the progress callbacks feeding its live view.
+func tuiScanner(d *db.DB) tui.ScanFunc {
+	return func(ctx context.Context, cfg *config.Config, req tui.ScanRequest, progress func(tui.ScanProgress)) (tui.ScanSummary, error) {
+		j, err := defaultScanJob(cfg, req.Mode)
+		if err != nil {
+			return tui.ScanSummary{Mode: req.Mode}, err
+		}
+		j.Filter = req.Filter
+		j.Restart = j.Restart || req.Restart
+		j.Logf = func(format string, a ...any) { progress(tui.ScanProgress{Message: fmt.Sprintf(format, a...)}) }
+		j.OnStart = func(run *db.ScanRun, total, done int, extras string) {
+			progress(tui.ScanProgress{Run: run.ID, Started: true, Total: total, Done: done, Extras: extras})
+		}
+		j.OnReport = func(r scan.Report, done, total int) {
+			progress(tui.ScanProgress{Report: &r, Done: done, Total: total})
+		}
+		res, err := runScanJob(ctx, d, cfg, j)
+		sum := tui.ScanSummary{Run: res.Run, Mode: res.Mode, State: res.State, Total: res.Total, Done: res.Done,
+			Alive: res.Alive, Dead: res.Dead, Listed: res.Listed, Elapsed: res.ElapsedNS, Ranked: res.Ranked,
+			Tags: res.Tags, Resumed: res.Resumed, Interrupted: res.Interrupted}
+		if errors.Is(err, errNoMatch) {
+			err = tui.ErrNoMatch
+		}
+		return sum, err
+	}
 }

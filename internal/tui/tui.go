@@ -10,6 +10,7 @@
 //	                scans, lists, config)
 //	actions.go      background work shared by keys and the palette (check, tags,
 //	                rank, export, config writes, clipboard)
+//	scan.go         starting / polling / pausing a scan through Options.StartScan
 //	palette.go      the ':' command palette and its command registry
 //	help.go         the '?' overlay (markdown via glamour, or plain text)
 //	table.go        the scrollable table used by every list
@@ -95,6 +96,12 @@ type Options struct {
 	ScoreOptions func(cfg *config.Config, mode string) score.Options
 	TagOptions   func(cfg *config.Config) score.TagOptions
 	ListManager  func(cfg *config.Config) (*reputation.Manager, error)
+	// StartScan runs a scan (px scan's job runner); nil disables starting
+	// scans from the TUI.
+	StartScan ScanFunc
+	// Notice prints a line after the TUI left the screen (pausing a scan
+	// on exit); nil = silent.
+	Notice func(format string, a ...any)
 
 	// Getenv reads SILKROUTER_ACTIVE / SILKROUTER_PROXY / SILKROUTER_SESSION
 	// and TMUX / TERM (default os.Getenv).
@@ -254,6 +261,10 @@ func Run(ctx context.Context, opts Options) error {
 		popts = append(popts, tea.WithOutput(opts.Output))
 	}
 	_, err = tea.NewProgram(m, popts...).Run()
+	// A scan still running is cancelled and allowed to save its state
+	// (paused, resumable) before the caller closes the database.
+	m.cancel()
+	m.waitScanOnExit()
 	switch {
 	case errors.Is(err, tea.ErrInterrupted):
 		return nil // SIGINT from outside the terminal

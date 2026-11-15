@@ -196,6 +196,7 @@ var namedKeys = map[string]tea.KeyType{
 	"enter": tea.KeyEnter, "esc": tea.KeyEsc, "tab": tea.KeyTab, "shift+tab": tea.KeyShiftTab, "up": tea.KeyUp,
 	"down": tea.KeyDown, "pgup": tea.KeyPgUp, "pgdown": tea.KeyPgDown, "home": tea.KeyHome, "end": tea.KeyEnd,
 	"backspace": tea.KeyBackspace, "ctrl+c": tea.KeyCtrlC, "ctrl+u": tea.KeyCtrlU, "ctrl+r": tea.KeyCtrlR,
+	"left": tea.KeyLeft, "right": tea.KeyRight,
 }
 
 func (h *harness) key(ks ...string) {
@@ -702,12 +703,12 @@ func TestQuitConfirm(t *testing.T) {
 	h := newHarness(t)
 	id, _ := h.m.startJob("check #1")
 	h.key("q")
-	if !h.m.confirming || h.quit {
+	if h.m.ask == nil || h.quit {
 		t.Fatal("q quit while a job runs")
 	}
 	h.mustSee("check #1 running: quit anyway?")
 	h.key("n")
-	if h.m.confirming || h.quit {
+	if h.m.ask != nil || h.quit {
 		t.Fatal("n did not cancel")
 	}
 	h.key("q", "y")

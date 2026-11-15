@@ -12,6 +12,7 @@ import (
 	"github.com/charmbracelet/lipgloss"
 
 	"github.com/szmelc-inc/silkrouter/internal/db"
+	"github.com/szmelc-inc/silkrouter/internal/paths"
 	"github.com/szmelc-inc/silkrouter/internal/proxy"
 	"github.com/szmelc-inc/silkrouter/internal/score"
 )
@@ -100,7 +101,7 @@ func (v *dashboardView) update(m *Model, msg tea.Msg) tea.Cmd {
 				v.data = msg.data
 			}
 		}
-	case rankDoneMsg, retagDoneMsg, checkDoneMsg, tagsChangedMsg:
+	case rankDoneMsg, retagDoneMsg, checkDoneMsg, tagsChangedMsg, scanEndedMsg:
 		if m.activeView() == view(v) {
 			return v.refresh(m)
 		}
@@ -299,7 +300,7 @@ func (v *dashboardView) tagsCard(m *Model, w int) string {
 		if score.IsHeuristic(t.Tag) {
 			kind = s.Muted.Render("heuristic")
 		}
-		lines = append(lines, s.Tag.Render(pad(label, max(8, w-20), false))+pad(commas(t.Count), 7, true)+"  "+kind)
+		lines = append(lines, s.tagStyle(label).Render(pad(label, max(8, w-20), false))+pad(commas(t.Count), 7, true)+"  "+kind)
 	}
 	return strings.Join(lines, "\n")
 }
@@ -358,7 +359,7 @@ func (v *dashboardView) status(m *Model) []string {
 	}
 	st := v.data.stats
 	return []string{commas(st.Proxies) + " proxies", commas(st.ByStatus[db.StatusAlive]) + " alive",
-		"db " + m.d.Path()}
+		"db " + paths.Pretty(m.d.Path())}
 }
 
 func (v *dashboardView) help() []key.Binding {

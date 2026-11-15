@@ -3,7 +3,6 @@ package tui
 import (
 	"strings"
 
-	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/x/ansi"
 )
 
@@ -22,8 +21,16 @@ type column struct {
 // after padding (widths are computed on the plain text).
 type cell struct {
 	text  string
-	style lipgloss.Style
+	style styler // nil = plain
 }
+
+// styler renders a padded cell: a lipgloss.Style, or a renderFunc for
+// several colors in one cell (tags). It must not change the width.
+type styler interface{ Render(strs ...string) string }
+
+type renderFunc func(string) string
+
+func (f renderFunc) Render(strs ...string) string { return f(strings.Join(strs, " ")) }
 
 func plainCell(s string) cell { return cell{text: s} }
 
@@ -244,7 +251,12 @@ func (t *table) view(s *Styles, width int) string {
 			if i < len(row) {
 				c = row[i]
 			}
-			b.WriteString(c.style.Render(pad(c.text, ws[i], t.cols[i].right)))
+			text := pad(c.text, ws[i], t.cols[i].right)
+			if c.style == nil {
+				b.WriteString(text)
+				continue
+			}
+			b.WriteString(c.style.Render(text))
 		}
 	}
 	return b.String()

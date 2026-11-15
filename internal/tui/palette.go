@@ -12,6 +12,7 @@ import (
 	"github.com/szmelc-inc/silkrouter/internal/cli"
 	"github.com/szmelc-inc/silkrouter/internal/config"
 	"github.com/szmelc-inc/silkrouter/internal/db"
+	"github.com/szmelc-inc/silkrouter/internal/scan"
 	"github.com/szmelc-inc/silkrouter/internal/score"
 )
 
@@ -154,6 +155,18 @@ func buildCommands() []command {
 				}
 				return m.rank(mode)
 			}},
+		{name: "scan", args: "[MODE [all|alive|filter|selected] [restart]] | stop",
+			help: "start a scan in the background (quick, full, reputation, geo, protocols; default every proxy); :scan alone opens the form, :scan stop pauses",
+			complete: func(_ *Model, i int, prev []string) []string {
+				if i == 0 {
+					return append(append([]string(nil), scan.Modes...), "stop")
+				}
+				if len(prev) > 0 && prev[0] == "stop" {
+					return nil
+				}
+				return append(append([]string(nil), scanSelections...), "restart")
+			},
+			run: func(m *Model, args []string) tea.Cmd { return m.paletteScan(args) }},
 		{name: "retag", help: "recompute every heuristic tag now (px tags refresh)",
 			run: func(m *Model, _ []string) tea.Cmd { return m.retag() }},
 		{name: "refresh", aliases: []string{"reload"}, help: "reload the current tab",

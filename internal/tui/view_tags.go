@@ -25,6 +25,7 @@ var tagDesc = map[string]string{
 	score.TagTor:         "heuristic: a Tor exit",
 	score.TagDatacenter:  "heuristic: a hosting / datacenter range",
 	score.TagKnown:       "heuristic: on a known-proxy list (many sites block these)",
+	score.TagMITM:        "heuristic: intercepts TLS (a certificate that does not verify: it can read your HTTPS); route skips it",
 	"blocked":            "manual: route never picks it (route.exclude_tags); b toggles it in the Proxies tab",
 	"pinned":             "manual: your label, usable with px --tag pinned <cmd>",
 }
@@ -91,7 +92,7 @@ func (v *tagsView) rebuild(m *Model) {
 		if score.IsHeuristic(t.Tag) {
 			kind = cell{"heuristic", s.Muted}
 		}
-		rows[i] = []cell{{labelOf(t), s.Tag}, plainCell(commas(t.Count)), kind,
+		rows[i] = []cell{{labelOf(t), s.tagStyle(labelOf(t))}, plainCell(commas(t.Count)), kind,
 			{bar(float64(t.Count)/float64(most), 24), s.Accent}}
 	}
 	v.tbl.setRows(rows)
@@ -130,7 +131,7 @@ func (v *tagsView) update(m *Model, msg tea.Msg) tea.Cmd {
 			}
 			v.rebuild(m)
 		}
-	case retagDoneMsg, rankDoneMsg, tagsChangedMsg:
+	case retagDoneMsg, rankDoneMsg, tagsChangedMsg, scanEndedMsg:
 		if m.activeView() == view(v) {
 			return v.refresh(m)
 		}
@@ -227,7 +228,7 @@ func (v *tagsView) render(m *Model) string {
 		if t.Scope != "" {
 			d += fmt.Sprintf(" · scope %q", t.Scope)
 		}
-		desc = s.Tag.Render(labelOf(t)) + "  " + s.Muted.Render(d)
+		desc = s.tagStyle(labelOf(t)).Render(labelOf(t)) + "  " + s.Muted.Render(d)
 	}
 	return body + "\n" + s.Faint.Render(" "+strings.Repeat("─", max(1, v.w-2))) + "\n " + desc + "\n " +
 		s.Faint.Render("enter: the proxies carrying it · R: recompute every heuristic tag now (tags.* thresholds)")

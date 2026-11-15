@@ -35,7 +35,21 @@ func anonShort(a string) string {
 	return a
 }
 
-func scoreCell(s *Styles, f *float64) cell { return cell{fptr(f), s.score(f)} }
+func scoreCell(s *Styles, f *float64) cell { return cell{text: fptr(f), style: s.score(f)} }
+
+// tlsCell is the TLS verdict of the HTTPS check: MITM (a certificate that
+// does not verify: the proxy decrypts HTTPS), ok, fail or unchecked.
+func tlsCell(s *Styles, httpsOK, mitm *bool) cell {
+	switch {
+	case mitm != nil && *mitm:
+		return cell{text: "MITM", style: s.Bad.Bold(true)}
+	case httpsOK != nil && *httpsOK:
+		return cell{text: "ok", style: s.Good}
+	case httpsOK != nil:
+		return cell{text: "fail", style: s.Warn}
+	}
+	return cell{text: "-", style: s.Muted}
+}
 
 var proxyColDefs = []proxyCol{
 	{"id", column{title: "ID", right: true}, func(s *Styles, p *db.Proxy) cell {
@@ -92,8 +106,9 @@ var proxyColDefs = []proxyCol{
 	{"exit", column{title: "EXIT IP"}, func(s *Styles, p *db.Proxy) cell { return cell{dash(p.ExitIP), s.Text} }},
 	{"org", column{title: "ORG", max: 24}, func(s *Styles, p *db.Proxy) cell { return cell{dash(p.Org), s.Muted} }},
 	{"source", column{title: "SOURCE", max: 16}, func(s *Styles, p *db.Proxy) cell { return cell{p.Source, s.Muted} }},
+	{"tls", column{title: "TLS"}, func(s *Styles, p *db.Proxy) cell { return tlsCell(s, p.HTTPSOK, p.TLSMITM) }},
 	{"tags", column{title: "TAGS", flex: true, min: 8}, func(s *Styles, p *db.Proxy) cell {
-		return cell{strings.Join(p.Tags, " "), s.Tag}
+		return cell{text: strings.Join(p.Tags, " "), style: renderFunc(s.tags)}
 	}},
 }
 
@@ -236,6 +251,18 @@ func (f proxyFilter) segments() []string {
 	}
 	if f.search != "" {
 		out = append(out, "/"+f.search)
+	}
+	return out
+}
+
+// selectionSegments describes the selection only (no sort), for a scan's
+// label.
+func (f proxyFilter) selectionSegments() []string {
+	var out []string
+	for _, s := range f.segments() {
+		if !strings.HasPrefix(s, "sort:") {
+			out = append(out, s)
+		}
 	}
 	return out
 }
@@ -588,7 +615,7 @@ func (v *proxiesView) update(m *Model, msg tea.Msg) tea.Cmd {
 		if msg.err == nil && v.isActive(m) {
 			return v.refresh(m)
 		}
-	case rankDoneMsg, retagDoneMsg:
+	case rankDoneMsg, retagDoneMsg, scanEndedMsg:
 		if v.isActive(m) {
 			return v.refresh(m)
 		}
@@ -632,6 +659,8 @@ func (v *proxiesView) key(m *Model, msg tea.KeyMsg) tea.Cmd {
 		return m.checkProxy(v.current())
 	case key.Matches(msg, keys.Copy):
 		return m.copyURL(v.current())
+	case key.Matches(msg, keys.ScanProxy):
+		return m.scanSelected()
 	}
 	if v.detail != nil {
 		return nil
@@ -859,7 +888,7 @@ func (v *proxiesView) help() []key.Binding {
 	return []key.Binding{
 		bind("enter", "open the details of the proxy", "enter"),
 		keys.Search, keys.Sort, keys.SortBack, keys.Reverse, keys.Status, keys.Scheme, keys.Dead, keys.Clear,
-		keys.PrevPage, keys.NextPage, keys.Tag, keys.Untag, keys.Block, keys.Check, keys.Copy,
+		keys.PrevPage, keys.NextPage, keys.Tag, keys.Untag, keys.Block, keys.Check, keys.Copy, keys.ScanProxy,
 		bind("esc", "close the details", "esc"),
 		bind("r", "reload the details", "r"),
 	}
@@ -867,8 +896,8 @@ func (v *proxiesView) help() []key.Binding {
 
 func (v *proxiesView) hints() []hint {
 	if v.detail != nil {
-		return []hint{{"esc", "back"}, {"↑↓", "scroll"}, {"t/T", "tag"}, {"b", "block"}, {"c", "check"}, {"y", "copy"}}
+		return []hint{{"esc", "back"}, {"↑↓", "scroll"}, {"t/T", "tag"}, {"b", "block"}, {"c", "check"}, {"F", "full scan"}, {"y", "copy"}}
 	}
 	return []hint{{"↑↓", "move"}, {"enter", "details"}, {"/", "search"}, {"s/r", "sort"}, {"a/p/D", "filter"},
-		{"t/b/c/y", "tag/block/check/copy"}}
+		{"t/b/c/F/y", "tag/block/check/scan/copy"}}
 }

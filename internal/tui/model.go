@@ -41,6 +41,15 @@ type (
 	spinMsg        struct{}
 )
 
+// question is a y/N confirmation shown in the bottom line (quit while jobs
+// run, pause the scan).
+type question struct {
+	text string
+	yes  func() tea.Cmd
+	quit bool // the quit question: ctrl+c answers yes
+	scan bool // the pause question: dropped when the scan ends by itself
+}
+
 // jobResult is implemented by the result messages of background jobs
 // (checks, ranking, tag refreshes, list downloads): the root forgets the
 // job when its result arrives.
@@ -86,8 +95,10 @@ type Model struct {
 
 	refreshEvery time.Duration
 	tickSeq      int
-	confirming   bool // "quit anyway?" while jobs run
+	ask          *question // a y/N question in the bottom line
 	quitting     bool
+
+	scan *scanSession // the running (or last finished) scan
 
 	tagLabels []string // tag labels for completion (loaded with the palette)
 
@@ -160,6 +171,8 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		return m, m.tick(spinEvery, func(time.Time) tea.Msg { return spinMsg{} })
+	case scanPollMsg:
+		return m, m.onScanPoll()
 	}
 	var cmds []tea.Cmd
 	if jr, ok := msg.(jobResult); ok {
@@ -185,18 +198,22 @@ func (m *Model) handleKey(msg tea.KeyMsg) tea.Cmd {
 		return tea.Batch(cmds...)
 	}
 	if msg.String() == "ctrl+c" {
-		if m.confirming {
+		if m.ask != nil && m.ask.quit {
 			return m.quit()
 		}
+		m.ask = nil
 		return m.requestQuit(false)
 	}
-	if m.confirming {
-		m.confirming = false
+	if q := m.ask; q != nil {
+		m.ask = nil
 		switch msg.String() {
 		case "y", "Y":
-			return m.quit()
+			return q.yes()
 		}
-		return m.notify(levelInfo, "still here")
+		if q.quit {
+			return m.notify(levelInfo, "still here")
+		}
+		return m.notify(levelInfo, "nothing changed")
 	}
 	if m.help.open {
 		return m.help.key(m, msg)
@@ -228,7 +245,7 @@ func (m *Model) handleKey(msg tea.KeyMsg) tea.Cmd {
 }
 
 func (m *Model) handleMouse(msg tea.MouseMsg) tea.Cmd {
-	if m.confirming || m.pal.open {
+	if m.ask != nil || m.pal.open {
 		return nil
 	}
 	switch msg.Button {
@@ -334,12 +351,18 @@ func (m *Model) jobsText() string {
 // set (force skips the question).
 func (m *Model) requestQuit(force bool) tea.Cmd {
 	if !force && len(m.jobs) > 0 && m.cfg.TUI.ConfirmQuit {
-		m.confirming = true
+		text := m.jobsText() + " running: quit anyway? [y/N]"
+		if m.scanRunning() {
+			text = m.jobsText() + " running: quit anyway? The scan pauses (resumable). [y/N]"
+		}
+		m.ask = &question{quit: true, text: text, yes: m.quit}
 		return nil
 	}
 	return m.quit()
 }
 
+// quit cancels every background job (a running scan pauses; Run waits for
+// it to save its state) and ends the program.
 func (m *Model) quit() tea.Cmd {
 	m.quitting = true
 	m.cancel()
@@ -475,8 +498,8 @@ func (m *Model) renderStatus() string {
 		pill = "[" + title + "]"
 	}
 	segs := v.status(m)
-	if len(m.jobs) > 0 {
-		segs = append(segs, spinFrames[m.spin%len(spinFrames)]+" "+m.jobsText())
+	if len(m.jobs) > 0 { // first: it must not be cut off
+		segs = append([]string{spinFrames[m.spin%len(spinFrames)] + " " + m.jobsText()}, segs...)
 	}
 	text := " " + strings.Join(segs, " · ") + " "
 	right := ""
@@ -497,8 +520,8 @@ type hint struct{ key, desc string }
 func (m *Model) renderBottom() string {
 	s := m.styles
 	switch {
-	case m.confirming:
-		return s.Warn.Render(fmt.Sprintf(" %s running: quit anyway? [y/N]", m.jobsText()))
+	case m.ask != nil:
+		return s.Warn.Render(" " + m.ask.text)
 	case m.pal.open:
 		return m.pal.input.View()
 	case m.help.open:

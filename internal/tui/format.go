@@ -85,6 +85,14 @@ func commas(n int) string {
 	return b.String()
 }
 
+// plural is "1 proxy" / "12,345 proxies".
+func plural(n int, one, many string) string {
+	if n == 1 {
+		return "1 " + one
+	}
+	return commas(n) + " " + many
+}
+
 // pctText renders a 0-1 rate as a percentage ("-" for a negative rate).
 func pctText(r float64) string {
 	if r < 0 {

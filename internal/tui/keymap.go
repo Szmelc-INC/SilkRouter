@@ -22,6 +22,8 @@ type keyMap struct {
 	Stats, StatsSort, Result, Mode key.Binding
 	// tags / scans / lists / config
 	Retag, Rank, Update, ForceUpdate, Edit, ResetKey key.Binding
+	// scans
+	NewScan, StopScan, Dismiss, ScanProxy key.Binding
 	// scans: up without k (k ranks)
 	UpNoK key.Binding
 }
@@ -79,6 +81,11 @@ var keys = keyMap{
 	ForceUpdate: bind("U", "download every list again", "U"),
 	Edit:        bind("enter/e", "edit the value (writes config.toml)", "enter", "e"),
 	ResetKey:    bind("x", "reset the key to its default", "x"),
+
+	NewScan:   bind("n", "start a scan: mode, selection, restart (enter starts)", "n"),
+	StopScan:  bind("x", "pause the running scan (asks; resumable)", "x"),
+	Dismiss:   bind("esc", "hide the finished scan's panel", "esc"),
+	ScanProxy: bind("F", "full-scan the proxy (background; Scans tab shows it)", "F"),
 
 	UpNoK: bind("↑", "up", "up"),
 }
